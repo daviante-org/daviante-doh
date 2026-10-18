@@ -472,15 +472,37 @@ function h2Request(
   });
 }
 
-function connectH2Session() {
+function connectH2SessionOnce() {
   return new Promise((resolve, reject) => {
     const client = http2.connect(BASE_URL, {
       rejectUnauthorized: false,
       ...(TEST_AUTHORITY ? { servername: TEST_AUTHORITY } : {}),
     });
     client.once('connect', () => resolve(client));
-    client.once('error', (err) => reject(err));
+    client.once('error', (err) => {
+      try {
+        client.destroy();
+      } catch {
+        // ignore cleanup error
+      }
+      reject(err);
+    });
   });
+}
+
+async function connectH2Session(maxAttempts = 15) {
+  let lastErr;
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    try {
+      return await connectH2SessionOnce();
+    } catch (err) {
+      lastErr = err;
+      if (attempt < maxAttempts) {
+        await new Promise((r) => setTimeout(r, 1000));
+      }
+    }
+  }
+  throw lastErr;
 }
 
 function escapeXml(str) {

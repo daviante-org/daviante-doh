@@ -117,16 +117,16 @@ wait_for_lb_ip() {
     ns="$1"
     svc="$2"
     ip=""
-    for _ in $(seq 1 30); do
+    for _ in $(seq 1 45); do
         ip=$(kubectl get svc "$svc" -n "$ns" -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null || true)
-        if [ -n "$ip" ]; then
+        if [ -n "$ip" ] && curl -ksS --max-time 2 "https://${ip}:8443/healthz" >/dev/null 2>&1; then
             echo "$ip"
             return 0
         fi
         sleep 1
     done
-    echo "Error: Timed out waiting for MetalLB LoadBalancer IP on ${ns}/${svc}" >&2
-    kubectl get svc -n "$ns" >&2 || true
+    echo "Error: Timed out waiting for MetalLB LoadBalancer IP (${ip:-unassigned}) readiness on ${ns}/${svc}" >&2
+    kubectl get svc,endpoints,pods -n "$ns" >&2 || true
     return 1
 }
 
