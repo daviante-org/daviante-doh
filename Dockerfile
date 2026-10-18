@@ -34,7 +34,7 @@ LABEL org.opencontainers.image.title="daviante-doh" \
       org.opencontainers.image.vendor="Daviante" \
       org.opencontainers.image.url="https://daviante.org" \
       org.opencontainers.image.source="https://github.com/daviante-org/daviante-doh" \
-      org.opencontainers.image.licenses="MIT"
+      org.opencontainers.image.licenses="Apache-2.0"
 
 RUN apk add --no-cache ca-certificates && \
     adduser -D -u 10001 -G root -h /etc/daviante-doh -s /sbin/nologin daviante-doh && \

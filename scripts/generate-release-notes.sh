@@ -35,7 +35,7 @@ fi
 cat > "$OUTPUT_FILE" <<EOF
 # \`daviante-doh\` \`${TAG}\` — Enterprise Production Release
 
-> **Release Date:** \`${RELEASE_DATE}\` • **Version:** \`${VERSION}\` • **License:** \`MIT\` • **Maintainer:** [Daviante](https://daviante.org)
+> **Release Date:** \`${RELEASE_DATE}\` • **Version:** \`${VERSION}\` • **License:** \`Apache-2.0\` • **Maintainer:** [Daviante](https://daviante.org)
 
 **\`daviante-doh\` \`${TAG}\`** is a production-hardened, zero-telemetry Rust library (\`daviante_doh\`) and standalone server binary (\`daviante-doh\`) implementing **DNS-over-HTTPS (\`RFC 8484\`)**, **Oblivious DoH (\`RFC 9230\` HPKE)**, **JSON DoH (\`RFC 3597\` / Google & Cloudflare Spec)**, **EDNS0 468-byte Block Padding (\`RFC 8467\`)**, and **Protective DNS Policy Enforcement (\`RFC 8914\` Extended DNS Errors)**.
 

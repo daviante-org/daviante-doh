@@ -7,7 +7,7 @@ rust-version = "1.89"
 description = "Lightweight, standards-compliant DNS-over-HTTPS (RFC 8484), Oblivious DoH (RFC 9230), and JSON DoH library and server by Daviante (daviante.org)"
 homepage = "https://daviante.org"
 repository = "https://github.com/daviante-org/daviante-doh"
-license = "MIT"
+license = "Apache-2.0"
 keywords = ["dns", "doh", "odoh", "https", "daviante-doh"]
 categories = ["network-programming", "asynchronous", "command-line-utilities"]
 

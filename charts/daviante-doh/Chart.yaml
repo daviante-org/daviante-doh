@@ -19,3 +19,7 @@ keywords:
 maintainers:
   - name: Daviante
     url: https://daviante.org
+annotations:
+  org.opencontainers.image.source: https://github.com/daviante-org/daviante-doh
+  org.opencontainers.image.licenses: Apache-2.0
+  artifacthub.io/license: Apache-2.0

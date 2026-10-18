@@ -49,3 +49,7 @@ sh ./scripts/e2e/run-blackbox-ci.sh
 
 1. **Standards-Mandated Rules ON by Default**: Protocol rules required by RFC 8484, RFC 9230, RFC 7871, RFC 8467, RFC 8914, RFC 8932, and OWASP are always enforced by default (see [`docs/STANDARDS_AND_SECURITY.md`](docs/STANDARDS_AND_SECURITY.md)).
 2. **Optional Enterprise Controls OFF by Default**: Stateful or environment-specific features (in-memory DNS cache, Prometheus `/metrics`, dedicated admin listener, domain allow/blocklists, `ANY` blocking, rate limiting, ECS injection) default to disabled (`false` / `0`) and are 100% configurable via CLI flags, `DOH_*` environment variables, and Helm `values.yaml`.
+
+## License
+
+By contributing to `daviante-doh`, you agree that your contributions will be licensed under the **Apache License, Version 2.0** (see [`LICENSE`](LICENSE) and [`NOTICE`](NOTICE)).
