@@ -1,0 +1,175 @@
+# =============================================================================
+# daviante-doh Helm Chart Values (by Daviante - https://daviante.org)
+# Works natively on both Kubernetes and Red Hat OpenShift (restricted-v2 SCC)
+# =============================================================================
+
+replicaCount: 2
+
+image:
+  repository: ghcr.io/daviante-org/daviante-doh
+  pullPolicy: IfNotPresent
+  tag: "" # Defaults to Chart appVersion
+  digest: "" # Optional immutable SHA-256 image digest (e.g. "sha256:...")
+
+imagePullSecrets: []
+nameOverride: ""
+fullnameOverride: ""
+
+serviceAccount:
+  create: true
+  automountServiceAccountToken: false
+  annotations: {}
+  name: ""
+
+# 100% Configurable daviante-doh runtime settings (injected via ConfigMap).
+# Optional enterprise features are OFF by default per Daviante guidelines.
+config:
+  listenAddress: "0.0.0.0:3000"
+  adminListenAddress: ""
+  # Supports single upstream or comma-separated list for automatic failover (e.g. "9.9.9.9:53,1.1.1.1:53")
+  serverAddress: "9.9.9.9:53"
+  localBindAddress: ""
+  hostname: ""
+  publicAddress: ""
+  publicPort: ""
+  path: "/dns-query"
+  odohConfigsPath: "/.well-known/odohconfigs"
+  healthPath: "/healthz"
+  enableMetrics: "false"
+  metricsPath: "/metrics"
+  maxClients: "512"
+  maxConcurrent: "16"
+  maxConnsPerIp: "0"
+  timeout: "10"
+  shutdownGracePeriod: "15"
+  minTtl: "0"
+  maxTtl: "604800"
+  errTtl: "2"
+  staleIfErrorSecs: "0"
+  staleWhileRevalidateSecs: "0"
+  cacheSize: "0"
+  disableKeepalive: "false"
+  disablePost: "false"
+  allowOdohPost: "false"
+  disableAny: "false"
+  enableEcs: "false"
+  trustedProxies: ""
+  ecsPrefixV4: "24"
+  ecsPrefixV6: "56"
+  odohRotationSecs: "86400"
+  allowlistFile: ""
+  blocklistFile: ""
+  blockAction: "nxdomain"
+  rateLimitRps: "0"
+  rateLimitBurst: "20"
+  rateLimitV6Prefix: "64"
+  corsAllowOrigin: "*"
+  logQueries: "false"
+  logClientIp: "false"
+  logFormat: "json"
+  logLevel: "info"
+  tlsMinVersion: "1.2"
+  extraArgs: []
+
+# Mountable Protective DNS allowlist/blocklist (H-11).
+# When allowlist or blocklist entries are specified (or existingConfigMap is set),
+# the chart mounts /etc/daviante-doh/policy and populates DOH_ALLOWLIST_FILE / DOH_BLOCKLIST_FILE.
+policy:
+  existingConfigMap: ""
+  allowlist: []
+  blocklist: []
+
+# Optional built-in TLS using a Kubernetes TLS Secret (mounts at /etc/daviante-doh/certs)
+tls:
+  enabled: false
+  secretName: ""
+
+# Pod-level SecurityContext:
+# By omitting a hardcoded `runAsUser` here and setting `USER 10001:0` + `g=u` inside the image,
+# this single chart works out-of-the-box on BOTH Kubernetes (runs as 10001:0) AND
+# Red Hat OpenShift `restricted-v2` SCC (injects namespace-assigned random UID with GID 0).
+podSecurityContext:
+  runAsNonRoot: true
+  seccompProfile:
+    type: RuntimeDefault
+
+containerSecurityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop:
+      - ALL
+
+terminationGracePeriodSeconds: 20
+
+service:
+  type: ClusterIP
+  port: 3000
+  adminPort: 9090
+
+# Standard Kubernetes Ingress
+ingress:
+  enabled: false
+  className: ""
+  annotations: {}
+  hosts:
+    - host: doh.example.com
+      paths:
+        - path: /dns-query
+          pathType: Exact
+        - path: /.well-known/odohconfigs
+          pathType: Exact
+  tls: []
+
+# Red Hat OpenShift Route (set `route.enabled: true` on OpenShift clusters)
+route:
+  enabled: false
+  host: ""
+  annotations: {}
+  tls:
+    enabled: true
+    termination: edge
+    insecureEdgeTerminationPolicy: Redirect
+
+# Optional Kubernetes NetworkPolicy (OFF by default)
+networkPolicy:
+  enabled: false
+  allowIngressFrom: []
+  extraEgressRules: []
+
+# Optional Prometheus Operator ServiceMonitor (OFF by default)
+serviceMonitor:
+  enabled: false
+  interval: 30s
+  scrapeTimeout: 10s
+  additionalLabels: {}
+
+resources:
+  requests:
+    cpu: 50m
+    memory: 32Mi
+    ephemeral-storage: 16Mi
+  limits:
+    cpu: 500m
+    memory: 128Mi
+    ephemeral-storage: 64Mi
+
+autoscaling:
+  enabled: false
+  minReplicas: 2
+  maxReplicas: 10
+  targetCPUUtilizationPercentage: 75
+
+pdb:
+  enabled: false
+  minAvailable: 1
+
+topologySpreadConstraints:
+  - maxSkew: 1
+    topologyKey: topology.kubernetes.io/zone
+    whenUnsatisfiable: ScheduleAnyway
+
+nodeSelector: {}
+tolerations: []
+affinity: {}
+podAnnotations: {}

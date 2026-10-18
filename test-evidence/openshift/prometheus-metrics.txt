@@ -1,0 +1,89 @@
+# HELP daviante_doh_requests_total Total DoH requests received by protocol flavor.
+# TYPE daviante_doh_requests_total counter
+daviante_doh_requests_total{flavor="wire"} 199
+daviante_doh_requests_total{flavor="json"} 1
+daviante_doh_requests_total{flavor="odoh"} 0
+# HELP daviante_doh_responses_total Total HTTP responses sent by status class.
+# TYPE daviante_doh_responses_total counter
+daviante_doh_responses_total{status="2xx"} 189
+daviante_doh_responses_total{status="4xx"} 99
+daviante_doh_responses_total{status="5xx"} 0
+# HELP daviante_doh_responses_by_rcode_total Total DNS responses sent by DNS RCODE.
+# TYPE daviante_doh_responses_by_rcode_total counter
+daviante_doh_responses_by_rcode_total{rcode="NOERROR"} 187
+daviante_doh_responses_by_rcode_total{rcode="FORMERR"} 0
+daviante_doh_responses_by_rcode_total{rcode="SERVFAIL"} 0
+daviante_doh_responses_by_rcode_total{rcode="NXDOMAIN"} 1
+daviante_doh_responses_by_rcode_total{rcode="NOTIMP"} 0
+daviante_doh_responses_by_rcode_total{rcode="REFUSED"} 0
+daviante_doh_responses_by_rcode_total{rcode="OTHER"} 0
+# HELP daviante_doh_cache_hits_total Total in-memory DNS cache hits.
+# TYPE daviante_doh_cache_hits_total counter
+daviante_doh_cache_hits_total 171
+# HELP daviante_doh_cache_misses_total Total in-memory DNS cache misses.
+# TYPE daviante_doh_cache_misses_total counter
+daviante_doh_cache_misses_total 17
+# HELP daviante_doh_policy_blocked_total Total DNS queries blocked by Protective DNS policy.
+# TYPE daviante_doh_policy_blocked_total counter
+daviante_doh_policy_blocked_total 0
+# HELP daviante_doh_rate_limited_total Total requests rejected due to per-IP rate limiting.
+# TYPE daviante_doh_rate_limited_total counter
+daviante_doh_rate_limited_total 83
+# HELP daviante_doh_connections_active Currently active client TCP/TLS connections.
+# TYPE daviante_doh_connections_active gauge
+daviante_doh_connections_active 69
+# HELP daviante_doh_upstream_queries_total Total queries sent to upstream DNS resolvers by transport.
+# TYPE daviante_doh_upstream_queries_total counter
+daviante_doh_upstream_queries_total{transport="udp"} 17
+daviante_doh_upstream_queries_total{transport="tcp"} 0
+daviante_doh_upstream_queries_total{upstream="1.1.1.1:53",transport="udp",result="ok"} 17
+# HELP daviante_doh_upstream_failures_total Total upstream DNS timeouts or socket errors.
+# TYPE daviante_doh_upstream_failures_total counter
+daviante_doh_upstream_failures_total 0
+# HELP daviante_doh_request_duration_seconds Request processing latency distribution in seconds.
+# TYPE daviante_doh_request_duration_seconds histogram
+daviante_doh_request_duration_seconds_bucket{flavor="wire",le="0.001"} 180
+daviante_doh_request_duration_seconds_bucket{flavor="wire",le="0.005"} 180
+daviante_doh_request_duration_seconds_bucket{flavor="wire",le="0.01"} 181
+daviante_doh_request_duration_seconds_bucket{flavor="wire",le="0.025"} 196
+daviante_doh_request_duration_seconds_bucket{flavor="wire",le="0.05"} 197
+daviante_doh_request_duration_seconds_bucket{flavor="wire",le="0.1"} 197
+daviante_doh_request_duration_seconds_bucket{flavor="wire",le="0.25"} 197
+daviante_doh_request_duration_seconds_bucket{flavor="wire",le="0.5"} 197
+daviante_doh_request_duration_seconds_bucket{flavor="wire",le="1"} 197
+daviante_doh_request_duration_seconds_bucket{flavor="wire",le="2.5"} 197
+daviante_doh_request_duration_seconds_bucket{flavor="wire",le="5"} 197
+daviante_doh_request_duration_seconds_bucket{flavor="wire",le="10"} 197
+daviante_doh_request_duration_seconds_bucket{flavor="wire",le="+Inf"} 197
+daviante_doh_request_duration_seconds_sum{flavor="wire"} 0.246219
+daviante_doh_request_duration_seconds_count{flavor="wire"} 197
+daviante_doh_request_duration_seconds_bucket{flavor="json",le="0.001"} 0
+daviante_doh_request_duration_seconds_bucket{flavor="json",le="0.005"} 0
+daviante_doh_request_duration_seconds_bucket{flavor="json",le="0.01"} 0
+daviante_doh_request_duration_seconds_bucket{flavor="json",le="0.025"} 0
+daviante_doh_request_duration_seconds_bucket{flavor="json",le="0.05"} 0
+daviante_doh_request_duration_seconds_bucket{flavor="json",le="0.1"} 0
+daviante_doh_request_duration_seconds_bucket{flavor="json",le="0.25"} 0
+daviante_doh_request_duration_seconds_bucket{flavor="json",le="0.5"} 0
+daviante_doh_request_duration_seconds_bucket{flavor="json",le="1"} 0
+daviante_doh_request_duration_seconds_bucket{flavor="json",le="2.5"} 0
+daviante_doh_request_duration_seconds_bucket{flavor="json",le="5"} 0
+daviante_doh_request_duration_seconds_bucket{flavor="json",le="10"} 0
+daviante_doh_request_duration_seconds_bucket{flavor="json",le="+Inf"} 0
+daviante_doh_request_duration_seconds_sum{flavor="json"} 0.000000
+daviante_doh_request_duration_seconds_count{flavor="json"} 0
+daviante_doh_request_duration_seconds_bucket{flavor="odoh",le="0.001"} 0
+daviante_doh_request_duration_seconds_bucket{flavor="odoh",le="0.005"} 0
+daviante_doh_request_duration_seconds_bucket{flavor="odoh",le="0.01"} 0
+daviante_doh_request_duration_seconds_bucket{flavor="odoh",le="0.025"} 0
+daviante_doh_request_duration_seconds_bucket{flavor="odoh",le="0.05"} 0
+daviante_doh_request_duration_seconds_bucket{flavor="odoh",le="0.1"} 0
+daviante_doh_request_duration_seconds_bucket{flavor="odoh",le="0.25"} 0
+daviante_doh_request_duration_seconds_bucket{flavor="odoh",le="0.5"} 0
+daviante_doh_request_duration_seconds_bucket{flavor="odoh",le="1"} 0
+daviante_doh_request_duration_seconds_bucket{flavor="odoh",le="2.5"} 0
+daviante_doh_request_duration_seconds_bucket{flavor="odoh",le="5"} 0
+daviante_doh_request_duration_seconds_bucket{flavor="odoh",le="10"} 0
+daviante_doh_request_duration_seconds_bucket{flavor="odoh",le="+Inf"} 0
+daviante_doh_request_duration_seconds_sum{flavor="odoh"} 0.000000
+daviante_doh_request_duration_seconds_count{flavor="odoh"} 0

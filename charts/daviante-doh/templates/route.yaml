@@ -1,0 +1,28 @@
+{{- if .Values.route.enabled -}}
+apiVersion: route.openshift.io/v1
+kind: Route
+metadata:
+  name: {{ include "daviante-doh.fullname" . }}
+  labels:
+    {{- include "daviante-doh.labels" . | nindent 4 }}
+  {{- with .Values.route.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  {{- if .Values.route.host }}
+  host: {{ .Values.route.host | quote }}
+  {{- end }}
+  to:
+    kind: Service
+    name: {{ include "daviante-doh.fullname" . }}
+    weight: 100
+  port:
+    targetPort: http-doh
+  {{- if .Values.route.tls.enabled }}
+  tls:
+    termination: {{- if and .Values.tls.enabled (eq .Values.route.tls.termination "edge") }} reencrypt{{- else }} {{ .Values.route.tls.termination }}{{- end }}
+    insecureEdgeTerminationPolicy: {{ .Values.route.tls.insecureEdgeTerminationPolicy }}
+  {{- end }}
+  wildcardPolicy: None
+{{- end }}

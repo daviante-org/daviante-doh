@@ -1,0 +1,66 @@
+{{- $hasInlineAllow := gt (len .Values.policy.allowlist) 0 -}}
+{{- $hasInlineBlock := gt (len .Values.policy.blocklist) 0 -}}
+{{- $hasPolicyCm := or (ne .Values.policy.existingConfigMap "") $hasInlineAllow $hasInlineBlock -}}
+{{- $allowPath := .Values.config.allowlistFile -}}
+{{- if and (eq $allowPath "") (or $hasInlineAllow (ne .Values.policy.existingConfigMap "")) -}}
+{{- $allowPath = "/etc/daviante-doh/policy/allowlist.txt" -}}
+{{- end -}}
+{{- $blockPath := .Values.config.blocklistFile -}}
+{{- if and (eq $blockPath "") (or $hasInlineBlock (ne .Values.policy.existingConfigMap "")) -}}
+{{- $blockPath = "/etc/daviante-doh/policy/blocklist.txt" -}}
+{{- end -}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "daviante-doh.fullname" . }}-config
+  labels:
+    {{- include "daviante-doh.labels" . | nindent 4 }}
+data:
+  DOH_LISTEN_ADDRESS: {{ .Values.config.listenAddress | quote }}
+  DOH_ADMIN_LISTEN_ADDRESS: {{ .Values.config.adminListenAddress | quote }}
+  DOH_SERVER_ADDRESS: {{ .Values.config.serverAddress | quote }}
+  DOH_LOCAL_BIND_ADDRESS: {{ .Values.config.localBindAddress | quote }}
+  DOH_HOSTNAME: {{ .Values.config.hostname | quote }}
+  DOH_PUBLIC_ADDRESS: {{ .Values.config.publicAddress | quote }}
+  DOH_PUBLIC_PORT: {{ .Values.config.publicPort | quote }}
+  DOH_PATH: {{ .Values.config.path | quote }}
+  DOH_ODOH_CONFIGS_PATH: {{ .Values.config.odohConfigsPath | quote }}
+  DOH_HEALTH_PATH: {{ .Values.config.healthPath | quote }}
+  DOH_ENABLE_METRICS: {{ .Values.config.enableMetrics | quote }}
+  DOH_METRICS_PATH: {{ .Values.config.metricsPath | quote }}
+  DOH_MAX_CLIENTS: {{ .Values.config.maxClients | quote }}
+  DOH_MAX_CONCURRENT: {{ .Values.config.maxConcurrent | quote }}
+  DOH_MAX_CONNS_PER_IP: {{ .Values.config.maxConnsPerIp | quote }}
+  DOH_TIMEOUT: {{ .Values.config.timeout | quote }}
+  DOH_SHUTDOWN_GRACE_SECS: {{ .Values.config.shutdownGracePeriod | quote }}
+  DOH_MIN_TTL: {{ .Values.config.minTtl | quote }}
+  DOH_MAX_TTL: {{ .Values.config.maxTtl | quote }}
+  DOH_ERR_TTL: {{ .Values.config.errTtl | quote }}
+  DOH_STALE_IF_ERROR: {{ .Values.config.staleIfErrorSecs | quote }}
+  DOH_STALE_WHILE_REVALIDATE: {{ .Values.config.staleWhileRevalidateSecs | quote }}
+  DOH_CACHE_SIZE: {{ .Values.config.cacheSize | quote }}
+  DOH_DISABLE_KEEPALIVE: {{ .Values.config.disableKeepalive | quote }}
+  DOH_DISABLE_POST: {{ .Values.config.disablePost | quote }}
+  DOH_ALLOW_ODOH_POST: {{ .Values.config.allowOdohPost | quote }}
+  DOH_DISABLE_ANY: {{ .Values.config.disableAny | quote }}
+  DOH_ENABLE_ECS: {{ .Values.config.enableEcs | quote }}
+  DOH_TRUSTED_PROXIES: {{ .Values.config.trustedProxies | quote }}
+  DOH_ECS_PREFIX_V4: {{ .Values.config.ecsPrefixV4 | quote }}
+  DOH_ECS_PREFIX_V6: {{ .Values.config.ecsPrefixV6 | quote }}
+  DOH_ODOH_ROTATION_SECS: {{ .Values.config.odohRotationSecs | quote }}
+  DOH_ALLOWLIST_FILE: {{ $allowPath | quote }}
+  DOH_BLOCKLIST_FILE: {{ $blockPath | quote }}
+  DOH_BLOCK_ACTION: {{ .Values.config.blockAction | quote }}
+  DOH_RATE_LIMIT_RPS: {{ .Values.config.rateLimitRps | quote }}
+  DOH_RATE_LIMIT_BURST: {{ .Values.config.rateLimitBurst | quote }}
+  DOH_RATE_LIMIT_V6_PREFIX: {{ .Values.config.rateLimitV6Prefix | quote }}
+  DOH_CORS_ALLOW_ORIGIN: {{ .Values.config.corsAllowOrigin | quote }}
+  DOH_LOG_QUERIES: {{ .Values.config.logQueries | quote }}
+  DOH_LOG_CLIENT_IP: {{ .Values.config.logClientIp | quote }}
+  DOH_LOG_FORMAT: {{ .Values.config.logFormat | quote }}
+  DOH_LOG_LEVEL: {{ .Values.config.logLevel | quote }}
+  DOH_TLS_MIN_VERSION: {{ .Values.config.tlsMinVersion | quote }}
+  {{- if .Values.tls.enabled }}
+  DOH_TLS_CERT_PATH: "/etc/daviante-doh/certs/tls.crt"
+  DOH_TLS_CERT_KEY_PATH: "/etc/daviante-doh/certs/tls.key"
+  {{- end }}

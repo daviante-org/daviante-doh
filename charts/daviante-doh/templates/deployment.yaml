@@ -1,0 +1,138 @@
+{{- $hasInlineAllow := gt (len .Values.policy.allowlist) 0 -}}
+{{- $hasInlineBlock := gt (len .Values.policy.blocklist) 0 -}}
+{{- $hasPolicyCm := or (ne .Values.policy.existingConfigMap "") $hasInlineAllow $hasInlineBlock -}}
+{{- $policyCmName := .Values.policy.existingConfigMap -}}
+{{- if eq $policyCmName "" -}}
+{{- $policyCmName = printf "%s-policy" (include "daviante-doh.fullname" .) -}}
+{{- end -}}
+{{- $hasAdmin := ne .Values.config.adminListenAddress "" -}}
+{{- $probePort := ternary "http-admin" "http-doh" $hasAdmin -}}
+{{- $probeScheme := ternary "HTTP" (ternary "HTTPS" "HTTP" .Values.tls.enabled) $hasAdmin -}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "daviante-doh.fullname" . }}
+  labels:
+    {{- include "daviante-doh.labels" . | nindent 4 }}
+spec:
+  {{- if not .Values.autoscaling.enabled }}
+  replicas: {{ .Values.replicaCount }}
+  {{- end }}
+  selector:
+    matchLabels:
+      {{- include "daviante-doh.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      annotations:
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+        {{- if and (eq .Values.policy.existingConfigMap "") (or $hasInlineAllow $hasInlineBlock) }}
+        checksum/policy: {{ include (print $.Template.BasePath "/policy-configmap.yaml") . | sha256sum }}
+        {{- end }}
+        {{- with .Values.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      labels:
+        {{- include "daviante-doh.selectorLabels" . | nindent 8 }}
+    spec:
+      serviceAccountName: {{ include "daviante-doh.serviceAccountName" . }}
+      automountServiceAccountToken: {{ .Values.serviceAccount.automountServiceAccountToken }}
+      terminationGracePeriodSeconds: {{ .Values.terminationGracePeriodSeconds }}
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      containers:
+        - name: {{ .Chart.Name }}
+          securityContext:
+            {{- toYaml .Values.containerSecurityContext | nindent 12 }}
+          {{- if .Values.image.digest }}
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}@{{ .Values.image.digest }}"
+          {{- else }}
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+          {{- end }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          {{- if gt (len .Values.config.extraArgs) 0 }}
+          args:
+            {{- toYaml .Values.config.extraArgs | nindent 12 }}
+          {{- end }}
+          ports:
+            - name: http-doh
+              containerPort: {{ include "daviante-doh.containerPort" . | int }}
+              protocol: TCP
+            {{- if $hasAdmin }}
+            - name: http-admin
+              containerPort: {{ include "daviante-doh.adminPort" . | int }}
+              protocol: TCP
+            {{- end }}
+          envFrom:
+            - configMapRef:
+                name: {{ include "daviante-doh.fullname" . }}-config
+          {{- if or .Values.tls.enabled $hasPolicyCm }}
+          volumeMounts:
+            {{- if .Values.tls.enabled }}
+            - name: tls-certs
+              mountPath: /etc/daviante-doh/certs
+              readOnly: true
+            {{- end }}
+            {{- if $hasPolicyCm }}
+            - name: policy-lists
+              mountPath: /etc/daviante-doh/policy
+              readOnly: true
+            {{- end }}
+          {{- end }}
+          livenessProbe:
+            httpGet:
+              path: /livez
+              port: {{ $probePort }}
+              scheme: {{ $probeScheme }}
+            initialDelaySeconds: 3
+            periodSeconds: 15
+            timeoutSeconds: 3
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: {{ $probePort }}
+              scheme: {{ $probeScheme }}
+            initialDelaySeconds: 2
+            periodSeconds: 10
+            timeoutSeconds: 3
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+      {{- if or .Values.tls.enabled $hasPolicyCm }}
+      volumes:
+        {{- if .Values.tls.enabled }}
+        - name: tls-certs
+          secret:
+            secretName: {{ .Values.tls.secretName }}
+        {{- end }}
+        {{- if $hasPolicyCm }}
+        - name: policy-lists
+          configMap:
+            name: {{ $policyCmName }}
+        {{- end }}
+      {{- end }}
+      {{- if .Values.topologySpreadConstraints }}
+      topologySpreadConstraints:
+        {{- range .Values.topologySpreadConstraints }}
+        - maxSkew: {{ .maxSkew }}
+          topologyKey: {{ .topologyKey }}
+          whenUnsatisfiable: {{ .whenUnsatisfiable }}
+          labelSelector:
+            matchLabels:
+              {{- include "daviante-doh.selectorLabels" $ | nindent 14 }}
+        {{- end }}
+      {{- end }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

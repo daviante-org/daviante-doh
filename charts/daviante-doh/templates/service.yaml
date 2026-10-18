@@ -1,0 +1,21 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "daviante-doh.fullname" . }}
+  labels:
+    {{- include "daviante-doh.labels" . | nindent 4 }}
+spec:
+  type: {{ .Values.service.type }}
+  ports:
+    - port: {{ .Values.service.port }}
+      targetPort: http-doh
+      protocol: TCP
+      name: http-doh
+    {{- if ne .Values.config.adminListenAddress "" }}
+    - port: {{ .Values.service.adminPort }}
+      targetPort: http-admin
+      protocol: TCP
+      name: http-admin
+    {{- end }}
+  selector:
+    {{- include "daviante-doh.selectorLabels" . | nindent 4 }}

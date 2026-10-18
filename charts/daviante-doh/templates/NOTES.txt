@@ -1,0 +1,10 @@
+Thank you for installing {{ .Chart.Name }} (by Daviante - https://daviante.org).
+
+Service endpoint inside the cluster:
+  http://{{ include "daviante-doh.fullname" . }}.{{ .Release.Namespace }}.svc.cluster.local:{{ .Values.service.port }}{{ .Values.config.path }}
+
+Health check endpoint:
+  http://{{ include "daviante-doh.fullname" . }}.{{ .Release.Namespace }}.svc.cluster.local:{{ .Values.service.port }}{{ .Values.config.healthPath }}
+
+Oblivious DoH (RFC 9230) configs endpoint:
+  http://{{ include "daviante-doh.fullname" . }}.{{ .Release.Namespace }}.svc.cluster.local:{{ .Values.service.port }}{{ .Values.config.odohConfigsPath }}

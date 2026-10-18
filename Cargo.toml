@@ -1,0 +1,80 @@
+[package]
+name = "daviante-doh"
+version = "0.1.0"
+authors = ["Daviante <https://daviante.org>"]
+edition = "2021"
+rust-version = "1.89"
+description = "Lightweight, standards-compliant DNS-over-HTTPS (RFC 8484), Oblivious DoH (RFC 9230), and JSON DoH library and server by Daviante (daviante.org)"
+homepage = "https://daviante.org"
+repository = "https://github.com/daviante-org/daviante-doh"
+license = "MIT"
+keywords = ["dns", "doh", "odoh", "https", "daviante-doh"]
+categories = ["network-programming", "asynchronous", "command-line-utilities"]
+
+[lib]
+name = "daviante_doh"
+path = "src/lib.rs"
+
+[[bin]]
+name = "daviante-doh"
+path = "src/main.rs"
+required-features = ["cli"]
+
+[features]
+default = ["tls", "cli"]
+tls = ["dep:tokio-rustls"]
+cli = ["dep:clap", "dep:dnsstamps", "dep:mimalloc", "dep:tracing-core"]
+
+[dependencies]
+arc-swap = "1"
+base64 = "0.23"
+bytes = "1"
+clap = { version = "4", features = ["std", "env", "wrap_help"], optional = true }
+dnsstamps = { version = "0.1", optional = true }
+http-body-util = "0.1"
+hyper = { version = "1", default-features = false, features = [
+    "server",
+    "http1",
+    "http2",
+] }
+hyper-util = { version = "0.1", default-features = false, features = [
+    "server-auto",
+    "server-graceful",
+    "tokio",
+] }
+mimalloc = { version = "0.1", default-features = false, optional = true }
+odoh-rs = "1.0.5"
+rand = "0.10"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+tokio = { version = "1", features = [
+    "fs",
+    "io-util",
+    "macros",
+    "net",
+    "rt-multi-thread",
+    "signal",
+    "sync",
+    "time",
+] }
+tokio-rustls = { version = "0.26", default-features = false, features = [
+    "logging",
+    "ring",
+    "tls12",
+], optional = true }
+tracing = "0.1"
+tracing-core = { version = "0.1", optional = true }
+urlencoding = "2"
+
+[dev-dependencies]
+hyper = { version = "1", default-features = false, features = ["client", "http1", "http2"] }
+tokio = { version = "1", features = ["test-util"] }
+
+[profile.release]
+codegen-units = 1
+incremental = false
+lto = "fat"
+opt-level = 3
+panic = "unwind"
+strip = "symbols"

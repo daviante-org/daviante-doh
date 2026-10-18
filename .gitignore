@@ -1,0 +1,10 @@
+/target/
+/dist/
+/.scannerwork/
+lcov.info
+*.profraw
+*.profdata
+.env
+*.pem
+*.key
+*.crt

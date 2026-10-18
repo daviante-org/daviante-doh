@@ -1,0 +1,1 @@
+{"routerLbVip":"172.18.0.242","routeHost":"doh.apps.openshift.local","routeTermination":"reencrypt","podDistribution":"daviante-doh-pod-1=292 daviante-doh-pod-2=291"}

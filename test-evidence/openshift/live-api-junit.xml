@@ -1,0 +1,86 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuites name="daviante-doh Live Black-Box Suite (Red Hat OpenShift (Route CRD + HAProxy Router + restricted-v2 SCC, 2 Replicas))" tests="73" failures="0" time="0.697">
+  <testsuite name="1. Record Type Matrix" tests="22" failures="0" time="0.384">
+    <testcase classname="1. Record Type Matrix" name="TC-01: A query (example.com) via HTTP/2 GET" time="0.0216" />
+    <testcase classname="1. Record Type Matrix" name="TC-02: A query (example.com) via HTTP/2 POST" time="0.0251" />
+    <testcase classname="1. Record Type Matrix" name="TC-03: AAAA query (example.com) via HTTP/2 GET" time="0.0206" />
+    <testcase classname="1. Record Type Matrix" name="TC-04: AAAA query (example.com) via HTTP/2 POST" time="0.0160" />
+    <testcase classname="1. Record Type Matrix" name="TC-05: CNAME query (www.github.com) via HTTP/2 GET" time="0.0184" />
+    <testcase classname="1. Record Type Matrix" name="TC-06: CNAME query (www.github.com) via HTTP/2 POST" time="0.0147" />
+    <testcase classname="1. Record Type Matrix" name="TC-07: MX query (google.com) via HTTP/2 GET" time="0.0170" />
+    <testcase classname="1. Record Type Matrix" name="TC-08: MX query (google.com) via HTTP/2 POST" time="0.0155" />
+    <testcase classname="1. Record Type Matrix" name="TC-09: TXT query (example.com) via HTTP/2 GET" time="0.0171" />
+    <testcase classname="1. Record Type Matrix" name="TC-10: TXT query (example.com) via HTTP/2 POST" time="0.0173" />
+    <testcase classname="1. Record Type Matrix" name="TC-11: NS query (example.com) via HTTP/2 GET" time="0.0162" />
+    <testcase classname="1. Record Type Matrix" name="TC-12: NS query (example.com) via HTTP/2 POST" time="0.0164" />
+    <testcase classname="1. Record Type Matrix" name="TC-13: SOA query (example.com) via HTTP/2 GET" time="0.0317" />
+    <testcase classname="1. Record Type Matrix" name="TC-14: SOA query (example.com) via HTTP/2 POST" time="0.0156" />
+    <testcase classname="1. Record Type Matrix" name="TC-15: PTR query (1.1.1.1.in-addr.arpa) via HTTP/2 GET" time="0.0159" />
+    <testcase classname="1. Record Type Matrix" name="TC-16: PTR query (1.1.1.1.in-addr.arpa) via HTTP/2 POST" time="0.0157" />
+    <testcase classname="1. Record Type Matrix" name="TC-17: SRV query (_imaps._tcp.gmail.com) via HTTP/2 GET" time="0.0158" />
+    <testcase classname="1. Record Type Matrix" name="TC-18: SRV query (_imaps._tcp.gmail.com) via HTTP/2 POST" time="0.0158" />
+    <testcase classname="1. Record Type Matrix" name="TC-19: HTTPS query (cloudflare.com) via HTTP/2 GET" time="0.0171" />
+    <testcase classname="1. Record Type Matrix" name="TC-20: HTTPS query (cloudflare.com) via HTTP/2 POST" time="0.0137" />
+    <testcase classname="1. Record Type Matrix" name="TC-21: SVCB query (_dns.resolver.arpa) via HTTP/2 GET" time="0.0124" />
+    <testcase classname="1. Record Type Matrix" name="TC-22: SVCB query (_dns.resolver.arpa) via HTTP/2 POST" time="0.0139" />
+  </testsuite>
+  <testsuite name="2. DNS Edge Cases" tests="9" failures="0" time="0.097">
+    <testcase classname="2. DNS Edge Cases" name="TC-23: NXDOMAIN non-existent domain (nxdomain-probe-4375.google.com via GET)" time="0.0153" />
+    <testcase classname="2. DNS Edge Cases" name="TC-24: NXDOMAIN non-existent domain (nxdomain-probe-4376.invalid via POST)" time="0.0145" />
+    <testcase classname="2. DNS Edge Cases" name="TC-25: NODATA empty answer section (example.com QTYPE=RP via GET)" time="0.0136" />
+    <testcase classname="2. DNS Edge Cases" name="TC-26: NODATA empty answer section (example.com QTYPE=RP via POST)" time="0.0167" />
+    <testcase classname="2. DNS Edge Cases" name="TC-27: DNSSEC DO=1 signed response (example.com via GET)" time="0.0159" />
+    <testcase classname="2. DNS Edge Cases" name="TC-28: DNSSEC DO=1 signed response (cloudflare.com via POST)" time="0.0154" />
+    <testcase classname="2. DNS Edge Cases" name="TC-29: EDNS(0) Padded Query Payload (512 bytes exact)" time="0.0018" />
+    <testcase classname="2. DNS Edge Cases" name="TC-30: EDNS(0) Padded Query Payload (1232 bytes exact)" time="0.0019" />
+    <testcase classname="2. DNS Edge Cases" name="TC-31: EDNS(0) Padded Query Payload (4096 bytes exact)" time="0.0019" />
+  </testsuite>
+  <testsuite name="3. RFC 8484 HTTP Torture" tests="22" failures="0" time="0.053">
+    <testcase classname="3. RFC 8484 HTTP Torture" name="TC-32: Missing ?dns= parameter (no query string)" time="0.0017" />
+    <testcase classname="3. RFC 8484 HTTP Torture" name="TC-33: Missing ?dns= parameter (?foo=bar only)" time="0.0017" />
+    <testcase classname="3. RFC 8484 HTTP Torture" name="TC-34: Invalid base64url characters (?dns=!!!)" time="0.0019" />
+    <testcase classname="3. RFC 8484 HTTP Torture" name="TC-35: Empty ?dns= parameter (?dns=)" time="0.0017" />
+    <testcase classname="3. RFC 8484 HTTP Torture" name="TC-36: Padded = only (?dns===)" time="0.0015" />
+    <testcase classname="3. RFC 8484 HTTP Torture" name="TC-37: Padded base64 short payload (?dns=YWJj=)" time="0.0012" />
+    <testcase classname="3. RFC 8484 HTTP Torture" name="TC-38: Embedded = inside base64url (?dns=AA=B)" time="0.0017" />
+    <testcase classname="3. RFC 8484 HTTP Torture" name="TC-39: Standard base64 +/ alphabet (?dns=AAAB+/==)" time="0.0014" />
+    <testcase classname="3. RFC 8484 HTTP Torture" name="TC-40: POST with unsupported Content-Type: text/plain" time="0.0020" />
+    <testcase classname="3. RFC 8484 HTTP Torture" name="TC-41: POST with unsupported Content-Type: application/octet-stream" time="0.0022" />
+    <testcase classname="3. RFC 8484 HTTP Torture" name="TC-42: POST with unsupported Content-Type: text/html" time="0.0053" />
+    <testcase classname="3. RFC 8484 HTTP Torture" name="TC-43: POST with Content-Type: application/json" time="0.0018" />
+    <testcase classname="3. RFC 8484 HTTP Torture" name="TC-44: POST with missing Content-Type header" time="0.0016" />
+    <testcase classname="3. RFC 8484 HTTP Torture" name="TC-45: GET with unsupported Accept: text/plain" time="0.0014" />
+    <testcase classname="3. RFC 8484 HTTP Torture" name="TC-46: GET with unsupported Accept: text/html" time="0.0015" />
+    <testcase classname="3. RFC 8484 HTTP Torture" name="TC-47: GET with unsupported Accept: image/png" time="0.0017" />
+    <testcase classname="3. RFC 8484 HTTP Torture" name="TC-48: Unsupported HTTP method PUT on /dns-query" time="0.0016" />
+    <testcase classname="3. RFC 8484 HTTP Torture" name="TC-49: Unsupported HTTP method DELETE on /dns-query" time="0.0021" />
+    <testcase classname="3. RFC 8484 HTTP Torture" name="TC-50: Unsupported HTTP method PATCH on /dns-query" time="0.0026" />
+    <testcase classname="3. RFC 8484 HTTP Torture" name="TC-51: HTTP OPTIONS on /dns-query (W3C CORS preflight)" time="0.0025" />
+    <testcase classname="3. RFC 8484 HTTP Torture" name="TC-52: Disallowed GET method for Oblivious DoH (RFC 9230 §4.1 -&gt; 405)" time="0.0019" />
+    <testcase classname="3. RFC 8484 HTTP Torture" name="TC-53: Cache-Control max-age matches lowest Answer RR TTL (mozilla.org)" time="0.0121" />
+  </testsuite>
+  <testsuite name="4. Malformed &amp; Adversarial" tests="16" failures="0" time="0.077">
+    <testcase classname="4. Malformed &amp; Adversarial" name="TC-54: 0-byte empty POST body" time="0.0018" />
+    <testcase classname="4. Malformed &amp; Adversarial" name="TC-55: 1-byte truncated DNS header (0x12)" time="0.0017" />
+    <testcase classname="4. Malformed &amp; Adversarial" name="TC-56: 6-byte truncated DNS header" time="0.0020" />
+    <testcase classname="4. Malformed &amp; Adversarial" name="TC-57: 11-byte truncated DNS header (1 byte short of 12B header)" time="0.0036" />
+    <testcase classname="4. Malformed &amp; Adversarial" name="TC-58: 16-byte truncated DNS packet (1 byte short of 17B minimum)" time="0.0024" />
+    <testcase classname="4. Malformed &amp; Adversarial" name="TC-59: 4,097-byte body (exceeds MAX_DNS_QUERY_LEN=4096 by 1 byte)" time="0.0020" />
+    <testcase classname="4. Malformed &amp; Adversarial" name="TC-60: 65,536-byte oversized body (64 KiB)" time="0.0465" />
+    <testcase classname="4. Malformed &amp; Adversarial" name="TC-61: 100,000-byte oversized body (&gt;64 KiB)" time="0.0045" />
+    <testcase classname="4. Malformed &amp; Adversarial" name="TC-62: Cyclic compression pointer self-loop (0xC0 0x0C at offset 12)" time="0.0013" />
+    <testcase classname="4. Malformed &amp; Adversarial" name="TC-63: Mutual 2-pointer cyclic compression loop (0xC0 0x0E &lt;-&gt; 0xC0 0x0C)" time="0.0017" />
+    <testcase classname="4. Malformed &amp; Adversarial" name="TC-64: Out-of-bounds compression pointer (0xC0 0xFF)" time="0.0016" />
+    <testcase classname="4. Malformed &amp; Adversarial" name="TC-65: Header QDCOUNT=100 with no question bytes (12B header only)" time="0.0015" />
+    <testcase classname="4. Malformed &amp; Adversarial" name="TC-66: Header QDCOUNT=100 with 1-question body (29B)" time="0.0015" />
+    <testcase classname="4. Malformed &amp; Adversarial" name="TC-67: DNS Response packet sent as query (QR=1 in header)" time="0.0019" />
+    <testcase classname="4. Malformed &amp; Adversarial" name="TC-68: Disallowed Zone Transfer query (QTYPE=AXFR 252)" time="0.0016" />
+    <testcase classname="4. Malformed &amp; Adversarial" name="TC-69: Post-adversarial server survival check (valid query after torture)" time="0.0020" />
+  </testsuite>
+  <testsuite name="5. Upstream &amp; Failure Modes" tests="4" failures="0" time="0.086">
+    <testcase classname="5. Upstream &amp; Failure Modes" name="TC-70: Cache Miss vs. Cache Hit back-to-back latency (ietf.org)" time="0.0018" />
+    <testcase classname="5. Upstream &amp; Failure Modes" name="TC-71: Cache Miss vs. Cache Hit back-to-back latency (rust-lang.org)" time="0.0021" />
+    <testcase classname="5. Upstream &amp; Failure Modes" name="TC-72: 500 Concurrent Request Flood (Connection Pooling &amp; Rate-Limiting)" time="0.0783" />
+    <testcase classname="5. Upstream &amp; Failure Modes" name="TC-73: Post-flood token-bucket recovery &amp; live /metrics verification" time="0.0035" />
+  </testsuite>
+</testsuites>

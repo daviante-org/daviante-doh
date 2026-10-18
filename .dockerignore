@@ -1,0 +1,15 @@
+.git
+.gitignore
+.github
+target
+dist
+charts
+scripts
+README.md
+.env
+.env.example
+compose.yaml
+.scannerwork
+lcov.info
+*.profraw
+*.profdata

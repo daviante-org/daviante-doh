@@ -1,0 +1,21 @@
+{{- if .Values.serviceMonitor.enabled -}}
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: {{ include "daviante-doh.fullname" . }}
+  labels:
+    {{- include "daviante-doh.labels" . | nindent 4 }}
+    {{- with .Values.serviceMonitor.additionalLabels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  selector:
+    matchLabels:
+      {{- include "daviante-doh.selectorLabels" . | nindent 6 }}
+  endpoints:
+    - port: {{ ternary "http-admin" "http-doh" (ne .Values.config.adminListenAddress "") }}
+      path: {{ .Values.config.metricsPath }}
+      interval: {{ .Values.serviceMonitor.interval }}
+      scrapeTimeout: {{ .Values.serviceMonitor.scrapeTimeout }}
+      scheme: {{ ternary "http" (ternary "https" "http" .Values.tls.enabled) (ne .Values.config.adminListenAddress "") }}
+{{- end }}

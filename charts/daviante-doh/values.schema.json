@@ -1,0 +1,127 @@
+{
+  "$schema": "https://json-schema.org/draft-07/schema#",
+  "title": "daviante-doh Helm Chart Values Schema",
+  "type": "object",
+  "properties": {
+    "replicaCount": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "image": {
+      "type": "object",
+      "properties": {
+        "repository": { "type": "string", "minLength": 1 },
+        "pullPolicy": {
+          "type": "string",
+          "enum": ["Always", "IfNotPresent", "Never"]
+        },
+        "tag": { "type": "string" },
+        "digest": { "type": "string" }
+      },
+      "required": ["repository", "pullPolicy"]
+    },
+    "config": {
+      "type": "object",
+      "properties": {
+        "listenAddress": {
+          "type": "string",
+          "pattern": "^.+:[0-9]{1,5}$"
+        },
+        "adminListenAddress": {
+          "type": "string",
+          "pattern": "^(|.+:[0-9]{1,5})$"
+        },
+        "serverAddress": {
+          "type": "string",
+          "minLength": 1
+        },
+        "path": {
+          "type": "string",
+          "pattern": "^/.*"
+        },
+        "odohConfigsPath": {
+          "type": "string",
+          "pattern": "^/.*"
+        },
+        "healthPath": {
+          "type": "string",
+          "pattern": "^/.*"
+        },
+        "metricsPath": {
+          "type": "string",
+          "pattern": "^/.*"
+        },
+        "blockAction": {
+          "type": "string",
+          "enum": ["nxdomain", "refused", "zero-ip"]
+        },
+        "logFormat": {
+          "type": "string",
+          "enum": ["json", "text"]
+        },
+        "tlsMinVersion": {
+          "type": "string",
+          "enum": ["1.2", "1.3"]
+        },
+        "extraArgs": {
+          "type": "array",
+          "items": { "type": "string" }
+        }
+      },
+      "required": ["listenAddress", "serverAddress", "path"]
+    },
+    "policy": {
+      "type": "object",
+      "properties": {
+        "existingConfigMap": { "type": "string" },
+        "allowlist": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "blocklist": {
+          "type": "array",
+          "items": { "type": "string" }
+        }
+      }
+    },
+    "tls": {
+      "type": "object",
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "secretName": { "type": "string" }
+      },
+      "required": ["enabled"],
+      "allOf": [
+        {
+          "if": {
+            "properties": { "enabled": { "const": true } }
+          },
+          "then": {
+            "properties": {
+              "secretName": { "type": "string", "minLength": 1 }
+            }
+          }
+        }
+      ]
+    },
+    "service": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "enum": ["ClusterIP", "NodePort", "LoadBalancer"]
+        },
+        "port": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 65535
+        },
+        "adminPort": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 65535
+        }
+      }
+    }
+  }
+}
