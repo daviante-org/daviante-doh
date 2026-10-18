@@ -378,11 +378,7 @@ function parseDnsResponse(buf) {
 }
 
 function toBase64UrlNoPad(buf) {
-  return buf
-    .toString('base64')
-    .replace(/\+/g, '-')
-    .replace(/\//g, '_')
-    .replace(/=+$/, '');
+  return buf.toString('base64url');
 }
 
 /**
@@ -569,6 +565,27 @@ async function runSuite() {
     { type: 'SVCB', qtype: 64, domain: '_dns.resolver.arpa' },
   ];
 
+  function sendDohWireQuery(method, wireQuery) {
+    if (method === 'GET') {
+      const b64 = toBase64UrlNoPad(wireQuery);
+      return h2Request(session, {
+        method: 'GET',
+        path: `${DOH_PATH}?dns=${b64}`,
+        headers: { accept: 'application/dns-message' },
+      });
+    }
+    return h2Request(session, {
+      method: 'POST',
+      path: DOH_PATH,
+      headers: {
+        'content-type': 'application/dns-message',
+        accept: 'application/dns-message',
+        'content-length': String(wireQuery.length),
+      },
+      body: wireQuery,
+    });
+  }
+
   let txCounter = 0x1100;
   for (const entry of recordMatrix) {
     const rowMetric = {
@@ -593,30 +610,12 @@ async function runSuite() {
         qtype: entry.qtype,
       });
       const b64 = toBase64UrlNoPad(wireQuery);
-
-      let resp;
-      let reqDesc;
-      if (method === 'GET') {
-        const pathWithQs = `${DOH_PATH}?dns=${b64}`;
-        reqDesc = `H2 GET ${pathWithQs.length > 68 ? pathWithQs.slice(0, 65) + '...' : pathWithQs} (Accept: application/dns-message, QNAME=${entry.domain}, QTYPE=${entry.type}, TXID=0x${txid.toString(16)})`;
-        resp = await h2Request(session, {
-          method: 'GET',
-          path: pathWithQs,
-          headers: { accept: 'application/dns-message' },
-        });
-      } else {
-        reqDesc = `H2 POST ${DOH_PATH} (${wireQuery.length}B wire, Content-Type: application/dns-message, QNAME=${entry.domain}, QTYPE=${entry.type}, TXID=0x${txid.toString(16)})`;
-        resp = await h2Request(session, {
-          method: 'POST',
-          path: DOH_PATH,
-          headers: {
-            'content-type': 'application/dns-message',
-            accept: 'application/dns-message',
-            'content-length': String(wireQuery.length),
-          },
-          body: wireQuery,
-        });
-      }
+      const pathWithQs = `${DOH_PATH}?dns=${b64}`;
+      const reqDesc =
+        method === 'GET'
+          ? `H2 GET ${pathWithQs.length > 68 ? pathWithQs.slice(0, 65) + '...' : pathWithQs} (Accept: application/dns-message, QNAME=${entry.domain}, QTYPE=${entry.type}, TXID=0x${txid.toString(16)})`
+          : `H2 POST ${DOH_PATH} (${wireQuery.length}B wire, Content-Type: application/dns-message, QNAME=${entry.domain}, QTYPE=${entry.type}, TXID=0x${txid.toString(16)})`;
+      const resp = await sendDohWireQuery(method, wireQuery);
 
       const parsed = parseDnsResponse(resp.body);
       const ct = resp.headers['content-type'] || '';
@@ -678,24 +677,7 @@ async function runSuite() {
     const txid = ++txCounter;
     const nxDomain = `nxdomain-probe-${txid}.${suffix}`;
     const q = buildDnsQuery({ txid, qname: nxDomain, qtype: 1 });
-    const b64 = toBase64UrlNoPad(q);
-    const resp =
-      method === 'GET'
-        ? await h2Request(session, {
-            method: 'GET',
-            path: `${DOH_PATH}?dns=${b64}`,
-            headers: { accept: 'application/dns-message' },
-          })
-        : await h2Request(session, {
-            method: 'POST',
-            path: DOH_PATH,
-            headers: {
-              'content-type': 'application/dns-message',
-              accept: 'application/dns-message',
-              'content-length': String(q.length),
-            },
-            body: q,
-          });
+    const resp = await sendDohWireQuery(method, q);
     const parsed = parseDnsResponse(resp.body);
     const pass =
       resp.status === 200 &&
@@ -722,24 +704,7 @@ async function runSuite() {
   for (const method of ['GET', 'POST']) {
     const txid = ++txCounter;
     const q = buildDnsQuery({ txid, qname: 'example.com', qtype: 17 }); // RP (17) -> NODATA on example.com
-    const b64 = toBase64UrlNoPad(q);
-    const resp =
-      method === 'GET'
-        ? await h2Request(session, {
-            method: 'GET',
-            path: `${DOH_PATH}?dns=${b64}`,
-            headers: { accept: 'application/dns-message' },
-          })
-        : await h2Request(session, {
-            method: 'POST',
-            path: DOH_PATH,
-            headers: {
-              'content-type': 'application/dns-message',
-              accept: 'application/dns-message',
-              'content-length': String(q.length),
-            },
-            body: q,
-          });
+    const resp = await sendDohWireQuery(method, q);
     const parsed = parseDnsResponse(resp.body);
     const pass =
       resp.status === 200 &&
@@ -773,24 +738,7 @@ async function runSuite() {
       qtype: 1,
       edns: { udpSize: 4096, doBit: true },
     });
-    const b64 = toBase64UrlNoPad(q);
-    const resp =
-      method === 'GET'
-        ? await h2Request(session, {
-            method: 'GET',
-            path: `${DOH_PATH}?dns=${b64}`,
-            headers: { accept: 'application/dns-message' },
-          })
-        : await h2Request(session, {
-            method: 'POST',
-            path: DOH_PATH,
-            headers: {
-              'content-type': 'application/dns-message',
-              accept: 'application/dns-message',
-              'content-length': String(q.length),
-            },
-            body: q,
-          });
+    const resp = await sendDohWireQuery(method, q);
     const parsed = parseDnsResponse(resp.body);
     const hasRrsig = parsed?.answers.some((a) => a.type === 46) ?? false;
     const isPadded468 = resp.body.length % 468 === 0;
@@ -824,16 +772,7 @@ async function runSuite() {
       edns: { udpSize: 4096, doBit: false },
       targetTotalBytes: targetBytes,
     });
-    const resp = await h2Request(session, {
-      method: 'POST',
-      path: DOH_PATH,
-      headers: {
-        'content-type': 'application/dns-message',
-        accept: 'application/dns-message',
-        'content-length': String(q.length),
-      },
-      body: q,
-    });
+    const resp = await sendDohWireQuery('POST', q);
     const parsed = parseDnsResponse(resp.body);
     const hasOpt = parsed?.additionals.some((r) => r.type === 41) ?? false;
     const isPadded468 = resp.body.length % 468 === 0;
@@ -1100,16 +1039,7 @@ async function runSuite() {
     const txid = ++txCounter;
     const freshDomain = 'mozilla.org';
     const q = buildDnsQuery({ txid, qname: freshDomain, qtype: 1 });
-    const resp = await h2Request(session, {
-      method: 'POST',
-      path: DOH_PATH,
-      headers: {
-        'content-type': 'application/dns-message',
-        accept: 'application/dns-message',
-        'content-length': String(q.length),
-      },
-      body: q,
-    });
+    const resp = await sendDohWireQuery('POST', q);
     const parsed = parseDnsResponse(resp.body);
     const ccHeader = resp.headers['cache-control'] || '';
     const maxAgeMatch = ccHeader.match(/max-age=(\d+)/);
@@ -1241,16 +1171,7 @@ async function runSuite() {
   ];
 
   for (const item of malformedPayloads) {
-    const r = await h2Request(session, {
-      method: 'POST',
-      path: DOH_PATH,
-      headers: {
-        'content-type': 'application/dns-message',
-        accept: 'application/dns-message',
-        'content-length': String(item.buf.length),
-      },
-      body: item.buf,
-    });
+    const r = await sendDohWireQuery('POST', item.buf);
     const hexPreview =
       item.buf.length === 0
         ? '<empty>'
@@ -1275,16 +1196,7 @@ async function runSuite() {
   {
     const txid = 0x4499;
     const q = buildDnsQuery({ txid, qname: 'example.com', qtype: 1 });
-    const r = await h2Request(session, {
-      method: 'POST',
-      path: DOH_PATH,
-      headers: {
-        'content-type': 'application/dns-message',
-        accept: 'application/dns-message',
-        'content-length': String(q.length),
-      },
-      body: q,
-    });
+    const r = await sendDohWireQuery('POST', q);
     const parsed = parseDnsResponse(r.body);
     const pass =
       r.status === 200 &&
@@ -1312,16 +1224,7 @@ async function runSuite() {
   for (const cacheDomain of ['ietf.org', 'rust-lang.org']) {
     const txMiss = ++txCounter;
     const qMiss = buildDnsQuery({ txid: txMiss, qname: cacheDomain, qtype: 1 });
-    const rMiss = await h2Request(session, {
-      method: 'POST',
-      path: DOH_PATH,
-      headers: {
-        'content-type': 'application/dns-message',
-        accept: 'application/dns-message',
-        'content-length': String(qMiss.length),
-      },
-      body: qMiss,
-    });
+    const rMiss = await sendDohWireQuery('POST', qMiss);
     const parsedMiss = parseDnsResponse(rMiss.body);
 
     // When behind an L7 load balancer with >1 replica, warm any additional replicas so the hit probe lands on a warm pod cache
@@ -1331,30 +1234,12 @@ async function runSuite() {
         qname: cacheDomain,
         qtype: 1,
       });
-      await h2Request(session, {
-        method: 'POST',
-        path: DOH_PATH,
-        headers: {
-          'content-type': 'application/dns-message',
-          accept: 'application/dns-message',
-          'content-length': String(qWarm.length),
-        },
-        body: qWarm,
-      });
+      await sendDohWireQuery('POST', qWarm);
     }
 
     const txHit = ++txCounter;
     const qHit = buildDnsQuery({ txid: txHit, qname: cacheDomain, qtype: 1 });
-    const rHit = await h2Request(session, {
-      method: 'POST',
-      path: DOH_PATH,
-      headers: {
-        'content-type': 'application/dns-message',
-        accept: 'application/dns-message',
-        'content-length': String(qHit.length),
-      },
-      body: qHit,
-    });
+    const rHit = await sendDohWireQuery('POST', qHit);
     const parsedHit = parseDnsResponse(rHit.body);
 
     const speedup = Number(

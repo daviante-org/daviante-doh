@@ -61,7 +61,7 @@ chmod 0644 "$CERT_FILE" "$KEY_FILE" "$PEM_FILE"
 if ! command -v kind >/dev/null 2>&1; then
     echo "==> Installing kind v0.27.0..."
     mkdir -p "$HOME/.local/bin"
-    curl -fsSLo "$HOME/.local/bin/kind" "https://kind.sigs.k8s.io/dl/v0.27.0/kind-linux-amd64"
+    curl --proto '=https' --tlsv1.2 -fsSLo "$HOME/.local/bin/kind" "https://kind.sigs.k8s.io/dl/v0.27.0/kind-linux-amd64"
     chmod +x "$HOME/.local/bin/kind"
     export PATH="$HOME/.local/bin:$PATH"
 fi

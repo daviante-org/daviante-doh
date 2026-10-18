@@ -18,6 +18,8 @@ spec:
       imagePullPolicy: {{ .Values.image.pullPolicy }}
       securityContext:
         {{- toYaml .Values.containerSecurityContext | nindent 8 }}
+      resources:
+        {{- toYaml .Values.resources | nindent 8 }}
       command: ["/usr/local/bin/daviante-doh", "--healthcheck"]
       env:
         - name: DOH_LISTEN_ADDRESS
