@@ -96,7 +96,7 @@ podman run -d --name daviante-doh-tls \
 
 ## 4. Kubernetes Production Deployment (MetalLB / Cloud LoadBalancer & Ingress)
 
-The unified Helm chart in [`charts/daviante-doh/`](../charts/daviante-doh/) provisions a production-hardened deployment with `PodDisruptionBudget`, `HorizontalPodAutoscaler`, `NetworkPolicy`, `ServiceMonitor`, and mountable Protective DNS policy `ConfigMap`.
+The unified Helm chart is published to **GitHub Container Registry (OCI)** at `oci://ghcr.io/daviante-org/charts/daviante-doh` (and available locally in [`charts/daviante-doh/`](../charts/daviante-doh/)). It provisions a production-hardened deployment with `PodDisruptionBudget`, `HorizontalPodAutoscaler`, `NetworkPolicy`, `ServiceMonitor`, and mountable Protective DNS policy `ConfigMap`.
 
 ```bash
 # 1. Create namespace and TLS secret
@@ -105,16 +105,17 @@ kubectl create secret tls daviante-doh-tls \
   --namespace daviante-doh \
   --cert=tls.crt --key=tls.key
 
-# 2. Install Helm release with LoadBalancer + Ingress + HPA + Prometheus ServiceMonitor
-helm upgrade --install daviante-doh ./charts/daviante-doh \
+# 2. Install Helm release from GHCR OCI Registry (or use ./charts/daviante-doh from a local clone)
+helm upgrade --install daviante-doh oci://ghcr.io/daviante-org/charts/daviante-doh \
+  --version 0.1.0 \
   --namespace daviante-doh \
   --set replicaCount=2 \
   --set service.type=LoadBalancer \
   --set tls.enabled=true \
   --set tls.secretName=daviante-doh-tls \
   --set config.serverAddress="9.9.9.9:53\,1.1.1.1:53\,8.8.8.8:53" \
-  --set config.cacheSize=10000 \
-  --set config.enableMetrics=true \
+  --set config.cacheSize="10000" \
+  --set config.enableMetrics="true" \
   --set config.adminListenAddress="0.0.0.0:9090" \
   --set ingress.enabled=true \
   --set ingress.hosts[0].host=doh.daviante.org \
@@ -140,8 +141,9 @@ helm test daviante-doh --namespace daviante-doh
 oc new-project daviante-doh
 oc create secret tls daviante-doh-tls --cert=tls.crt --key=tls.key
 
-# 2. Deploy with OpenShift Route (reencrypt TLS termination)
-helm upgrade --install daviante-doh ./charts/daviante-doh \
+# 2. Deploy from GHCR OCI Registry with OpenShift Route (reencrypt TLS termination)
+helm upgrade --install daviante-doh oci://ghcr.io/daviante-org/charts/daviante-doh \
+  --version 0.1.0 \
   --namespace daviante-doh \
   --set replicaCount=2 \
   --set tls.enabled=true \
@@ -151,8 +153,8 @@ helm upgrade --install daviante-doh ./charts/daviante-doh \
   --set route.tls.enabled=true \
   --set route.tls.termination=reencrypt \
   --set route.tls.insecureEdgeTerminationPolicy=Redirect \
-  --set config.cacheSize=10000 \
-  --set config.enableMetrics=true
+  --set config.cacheSize="10000" \
+  --set config.enableMetrics="true"
 ```
 
 ---

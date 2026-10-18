@@ -27,20 +27,23 @@ This directory contains the official Helm chart for **`daviante-doh`** (`0.1.0`)
 
 ---
 
-## Quick Start
+## Quick Start (GHCR OCI Registry or Local Chart)
 
 ### 1. Standard Kubernetes
 ```bash
-helm upgrade --install daviante-doh ./charts/daviante-doh \
+# Install directly from GHCR OCI Registry (or replace with ./charts/daviante-doh for local source)
+helm upgrade --install daviante-doh oci://ghcr.io/daviante-org/charts/daviante-doh \
+  --version 0.1.0 \
   --namespace daviante-doh --create-namespace \
   --set config.serverAddress="9.9.9.9:53\,1.1.1.1:53" \
-  --set config.cacheSize=10000 \
-  --set config.enableMetrics=true
+  --set config.cacheSize="10000" \
+  --set config.enableMetrics="true"
 ```
 
 ### 2. Red Hat OpenShift (`restricted-v2` SCC + `Route`)
 ```bash
-helm upgrade --install daviante-doh ./charts/daviante-doh \
+helm upgrade --install daviante-doh oci://ghcr.io/daviante-org/charts/daviante-doh \
+  --version 0.1.0 \
   --namespace daviante-doh \
   --set route.enabled=true \
   --set route.host="doh.apps.cluster.example.com" \

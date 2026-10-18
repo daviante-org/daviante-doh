@@ -173,17 +173,19 @@ podman run -d --name daviante-doh \
   ghcr.io/daviante-org/daviante-doh:latest
 ```
 
-### 2. Kubernetes & Red Hat OpenShift (Unified Helm Chart)
+### 2. Kubernetes & Red Hat OpenShift (Unified OCI Helm Chart)
 ```bash
-# Standard Kubernetes (LoadBalancer + Ingress + 10k Cache)
-helm upgrade --install daviante-doh ./charts/daviante-doh \
+# Standard Kubernetes via GHCR OCI Registry (LoadBalancer + Ingress + 10k Cache)
+helm upgrade --install daviante-doh oci://ghcr.io/daviante-org/charts/daviante-doh \
+  --version 0.1.0 \
   --namespace daviante-doh --create-namespace \
   --set service.type=LoadBalancer \
   --set config.serverAddress="9.9.9.9:53\,1.1.1.1:53" \
-  --set config.cacheSize=10000
+  --set config.cacheSize="10000"
 
 # Red Hat OpenShift (restricted-v2 SCC compatible out-of-the-box + OpenShift Route)
-helm upgrade --install daviante-doh ./charts/daviante-doh \
+helm upgrade --install daviante-doh oci://ghcr.io/daviante-org/charts/daviante-doh \
+  --version 0.1.0 \
   --namespace daviante-doh \
   --set route.enabled=true \
   --set route.host="doh.apps.ocp.example.com"

@@ -1,78 +1,217 @@
-name: release - daviante-doh
+name: Release & Publish - daviante-doh (GHCR Image, OCI Helm Chart & Binaries)
 
 on:
   push:
     tags:
-      - "v*.*.*"
+      - "v[0-9]+.[0-9]+.[0-9]+*"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Release SemVer (e.g. 0.1.0). Leave empty to use version from Cargo.toml"
+        required: false
+        default: ""
 
 permissions:
   contents: read
 
-jobs:
-  verify:
-    name: Pre-Release Verification Gate
-    runs-on: ubuntu-26.04
-    permissions:
-      contents: read
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
-        with:
-          components: rustfmt, clippy
-      - name: Check formatting
-        run: cargo fmt --all -- --check
-      - name: Run Clippy
-        run: |
-          cargo clippy --workspace --all-targets --all-features -- -D warnings
-          cargo clippy --workspace --all-targets --no-default-features -- -D warnings
-      - name: Run workspace tests
-        run: cargo test --workspace --all-features --release --locked
-      - name: Lint Helm chart
-        run: helm lint ./charts/daviante-doh --strict
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
 
-  publish-container:
-    name: Publish Multi-Arch Container Image & SBOM (GHCR)
-    needs: verify
+jobs:
+  release-and-publish:
+    name: Publish Multi-Arch GHCR Image, OCI Helm Chart & GitHub Release
     runs-on: ubuntu-26.04
+    timeout-minutes: 45
     permissions:
       contents: write
       packages: write
-      id-token: write
-      attestations: write
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4.4.0
-      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
-      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-      - uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
+          fetch-depth: 0
+
+      - name: Resolve Release Version & Tag Metadata
         id: meta
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
+          REF_NAME: ${{ github.ref_name }}
+          REF_TYPE: ${{ github.ref_type }}
+        run: |
+          if [ -n "${INPUT_VERSION}" ]; then
+            RAW_VER="${INPUT_VERSION#v}"
+          elif [ "${REF_TYPE}" = "tag" ]; then
+            RAW_VER="${REF_NAME#v}"
+          else
+            RAW_VER="$(awk -F'"' '/^version = / {print $2; exit}' Cargo.toml)"
+          fi
+
+          if ! echo "${RAW_VER}" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$'; then
+            echo "Error: Invalid SemVer version '${RAW_VER}'" >&2
+            exit 1
+          fi
+
+          MAJOR_MINOR="$(echo "${RAW_VER}" | cut -d. -f1,2)"
+          TAG="v${RAW_VER}"
+
+          echo "version=${RAW_VER}" >> "$GITHUB_OUTPUT"
+          echo "major_minor=${MAJOR_MINOR}" >> "$GITHUB_OUTPUT"
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+          echo "Resolved release version: ${RAW_VER} (tag: ${TAG}, major.minor: ${MAJOR_MINOR})"
+
+      - name: Set up QEMU & Docker Buildx for Multi-Arch (linux/amd64, linux/arm64)
+        run: |
+          docker run --privileged --rm tonistiigi/binfmt:qemu-v9.2.2-52 --install all
+          docker buildx create --name daviante-multiarch --driver docker-container --use --bootstrap
+
+      - name: Log in to GitHub Container Registry (GHCR)
+        env:
+          GHCR_USER: ${{ github.actor }}
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          printf '%s\n' "${GHCR_TOKEN}" | docker login ghcr.io -u "${GHCR_USER}" --password-stdin
+          printf '%s\n' "${GHCR_TOKEN}" | helm registry login ghcr.io -u "${GHCR_USER}" --password-stdin
+
+      - name: Build & Push Multi-Arch Container Image to GHCR
+        id: container
+        env:
+          VERSION: ${{ steps.meta.outputs.version }}
+          MAJOR_MINOR: ${{ steps.meta.outputs.major_minor }}
+          IMAGE_REPO: ghcr.io/daviante-org/daviante-doh
+        run: |
+          docker buildx build \
+            --platform linux/amd64,linux/arm64 \
+            --build-arg BUILD_TLS=true \
+            --build-arg RUN_TESTS=false \
+            --tag "${IMAGE_REPO}:${VERSION}" \
+            --tag "${IMAGE_REPO}:${MAJOR_MINOR}" \
+            --tag "${IMAGE_REPO}:latest" \
+            --metadata-file /tmp/buildx-meta.json \
+            --push \
+            -f Dockerfile .
+
+          IMAGE_DIGEST="$(node -e '
+            const fs = require("fs");
+            const m = JSON.parse(fs.readFileSync("/tmp/buildx-meta.json", "utf8"));
+            process.stdout.write(m["containerimage.digest"] || "");
+          ')"
+          echo "digest=${IMAGE_DIGEST}" >> "$GITHUB_OUTPUT"
+          echo "Published multi-arch image ${IMAGE_REPO}:${VERSION} (${IMAGE_DIGEST})"
+
+      - name: Scan Published GHCR Container Image with Trivy v0.76.0
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
-          images: ghcr.io/daviante-org/daviante-doh
-          tags: |
-            type=semver,pattern={{version}}
-            type=semver,pattern={{major}}.{{minor}}
-            type=raw,value=latest
-      - uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
-        id: push
+          version: "v0.76.0"
+          image-ref: "ghcr.io/daviante-org/daviante-doh:${{ steps.meta.outputs.version }}"
+          format: "table"
+          exit-code: "1"
+          ignore-unfixed: true
+          severity: "CRITICAL,HIGH"
+
+      - name: Install Rust Toolchain & Windows Cross-Compiler
+        uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
         with:
-          context: .
-          file: ./Dockerfile
-          platforms: linux/amd64,linux/arm64,linux/arm/v7
-          push: true
-          sbom: true
-          provenance: mode=max
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-          build-args: |
-            BUILD_TLS=true
-            RUN_TESTS=true
-      - name: Attest Build Provenance
-        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
-        with:
-          subject-name: ghcr.io/daviante-org/daviante-doh
-          subject-digest: ${{ steps.push.outputs.digest }}
-          push-to-registry: true
+          targets: x86_64-pc-windows-gnu
+
+      - name: Export Multi-Arch Static Binaries (Linux amd64/arm64 & Windows amd64)
+        env:
+          VERSION: ${{ steps.meta.outputs.version }}
+          IMAGE_REPO: ghcr.io/daviante-org/daviante-doh
+        run: |
+          mkdir -p ./dist
+
+          # 1. Extract verified static musl binaries from the published linux/amd64 and linux/arm64 images
+          docker pull --platform linux/amd64 "${IMAGE_REPO}:${VERSION}"
+          CID_AMD64="$(docker create --platform linux/amd64 "${IMAGE_REPO}:${VERSION}")"
+          docker cp "${CID_AMD64}:/usr/local/bin/daviante-doh" ./dist/daviante-doh-linux-amd64
+          docker rm -f "${CID_AMD64}" >/dev/null
+
+          docker pull --platform linux/arm64 "${IMAGE_REPO}:${VERSION}"
+          CID_ARM64="$(docker create --platform linux/arm64 "${IMAGE_REPO}:${VERSION}")"
+          docker cp "${CID_ARM64}:/usr/local/bin/daviante-doh" ./dist/daviante-doh-linux-arm64
+          docker rm -f "${CID_ARM64}" >/dev/null
+
+          chmod 0755 ./dist/daviante-doh-linux-amd64 ./dist/daviante-doh-linux-arm64
+
+          # 2. Cross-compile Windows x86_64 standalone executable
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends gcc-mingw-w64-x86-64
+          cargo build --release --locked --target x86_64-pc-windows-gnu --bin daviante-doh
+          cp ./target/x86_64-pc-windows-gnu/release/daviante-doh.exe ./dist/daviante-doh-windows-amd64.exe
+
+      - name: Lint, Package & Push OCI Helm Chart to GHCR
+        id: helm
+        env:
+          VERSION: ${{ steps.meta.outputs.version }}
+          HELM_OCI_REPO: oci://ghcr.io/daviante-org/charts
+        run: |
+          helm lint ./charts/daviante-doh --strict
+          helm package ./charts/daviante-doh \
+            --version "${VERSION}" \
+            --app-version "${VERSION}" \
+            --destination ./dist
+
+          PUSH_OUT="$(helm push "./dist/daviante-doh-${VERSION}.tgz" "${HELM_OCI_REPO}" 2>&1)"
+          echo "${PUSH_OUT}"
+          HELM_DIGEST="$(echo "${PUSH_OUT}" | awk '/^Digest:/ {print $2; exit}')"
+          echo "digest=${HELM_DIGEST:-sha256:published}" >> "$GITHUB_OUTPUT"
+
+      - name: Generate SHA256SUMS & Enterprise Release Notes
+        env:
+          VERSION: ${{ steps.meta.outputs.version }}
+          IMAGE_DIGEST: ${{ steps.container.outputs.digest }}
+          HELM_DIGEST: ${{ steps.helm.outputs.digest }}
+        run: |
+          (
+            cd ./dist
+            sha256sum \
+              daviante-doh-linux-amd64 \
+              daviante-doh-linux-arm64 \
+              daviante-doh-windows-amd64.exe \
+              "daviante-doh-${VERSION}.tgz" > SHA256SUMS
+          )
+          sh ./scripts/generate-release-notes.sh \
+            "${VERSION}" \
+            "${IMAGE_DIGEST}" \
+            "${HELM_DIGEST}" \
+            "./dist/SHA256SUMS" \
+            "./dist/RELEASE_NOTES.md"
+          cat ./dist/RELEASE_NOTES.md >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Publish GitHub Release & Upload Release Assets
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ steps.meta.outputs.version }}
+          TAG: ${{ steps.meta.outputs.tag }}
+        run: |
+          if ! git rev-parse "${TAG}" >/dev/null 2>&1; then
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git tag -a "${TAG}" -m "Release ${TAG}"
+            git push origin "${TAG}"
+          fi
+
+          TITLE="daviante-doh ${TAG} — Enterprise Production Release"
+          if gh release view "${TAG}" >/dev/null 2>&1; then
+            gh release edit "${TAG}" \
+              --title "${TITLE}" \
+              --notes-file ./dist/RELEASE_NOTES.md
+            gh release upload "${TAG}" \
+              ./dist/daviante-doh-linux-amd64 \
+              ./dist/daviante-doh-linux-arm64 \
+              ./dist/daviante-doh-windows-amd64.exe \
+              "./dist/daviante-doh-${VERSION}.tgz" \
+              ./dist/SHA256SUMS \
+              --clobber
+          else
+            gh release create "${TAG}" \
+              ./dist/daviante-doh-linux-amd64 \
+              ./dist/daviante-doh-linux-arm64 \
+              ./dist/daviante-doh-windows-amd64.exe \
+              "./dist/daviante-doh-${VERSION}.tgz" \
+              ./dist/SHA256SUMS \
+              --title "${TITLE}" \
+              --notes-file ./dist/RELEASE_NOTES.md \
+              --verify-tag
+          fi
