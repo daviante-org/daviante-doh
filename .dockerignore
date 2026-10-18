@@ -4,8 +4,13 @@
 target
 dist
 charts
+docs
 scripts
+test-evidence
 README.md
+CHANGELOG.md
+CONTRIBUTING.md
+SECURITY.md
 .env
 .env.example
 compose.yaml

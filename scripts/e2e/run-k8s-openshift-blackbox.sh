@@ -70,10 +70,11 @@ echo "==> [1/6] Creating kind Kubernetes cluster (${CLUSTER_NAME})..."
 kind delete cluster --name "$CLUSTER_NAME" >/dev/null 2>&1 || true
 kind create cluster --name "$CLUSTER_NAME" --wait 90s
 
-echo "==> [2/6] Loading pre-built ${IMAGE_TAG} and haproxy:3.1-alpine into kind cluster..."
-docker pull haproxy:3.1-alpine
-kind load docker-image "$IMAGE_TAG" --name "$CLUSTER_NAME"
-kind load docker-image haproxy:3.1-alpine --name "$CLUSTER_NAME"
+echo "==> [2/6] Loading pre-built ${IMAGE_TAG} and pulling haproxy:3.1-alpine into kind cluster..."
+if ! kind load docker-image "$IMAGE_TAG" --name "$CLUSTER_NAME"; then
+    docker save "$IMAGE_TAG" | docker exec -i "${CLUSTER_NAME}-control-plane" ctr --namespace=k8s.io images import --digests --snapshotter=overlayfs -
+fi
+docker exec "${CLUSTER_NAME}-control-plane" crictl pull docker.io/library/haproxy:3.1-alpine >/dev/null
 
 # -----------------------------------------------------------------------------
 # 2. Install MetalLB Layer-2 LoadBalancer Controller
