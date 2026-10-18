@@ -8,7 +8,8 @@
 [![Quality Gate Status](https://sonarcloud.io/api/project_badges/measure?project=daviante-org_daviante-doh&metric=alert_status)](https://sonarcloud.io/summary/new_code?id=daviante-org_daviante-doh)
 [![Coverage](https://sonarcloud.io/api/project_badges/measure?project=daviante-org_daviante-doh&metric=coverage)](https://sonarcloud.io/summary/new_code?id=daviante-org_daviante-doh)
 [![Security Rating](https://sonarcloud.io/api/project_badges/measure?project=daviante-org_daviante-doh&metric=security_rating)](https://sonarcloud.io/summary/new_code?id=daviante-org_daviante-doh)
-[![Rust](https://img.shields.io/badge/rust-1.85%2B%20(forbid(unsafe__code))-orange.svg)](Cargo.toml)
+[![Rust](https://img.shields.io/badge/rust-1.89%2B-orange.svg?logo=rust)](Cargo.toml)
+[![Unsafe](https://img.shields.io/badge/unsafe-forbidden-success.svg)](src/lib.rs)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
 **[Architecture & UML](docs/ARCHITECTURE.md)** • **[Global Standards & Security](docs/STANDARDS_AND_SECURITY.md)** • **[Usage Guide & Examples](docs/USAGE_GUIDE.md)** • **[Deployment Guide](docs/DEPLOYMENT.md)** • **[Helm Chart](charts/daviante-doh/README.md)** • **[Contributing](CONTRIBUTING.md)**

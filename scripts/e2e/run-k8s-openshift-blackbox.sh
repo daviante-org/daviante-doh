@@ -22,9 +22,10 @@ IMAGE_VERSION="${IMAGE_TAG##*:}"
 CERT_FILE="$(mktemp)"
 KEY_FILE="$(mktemp)"
 PEM_FILE="$(mktemp)"
+COMMON_VALUES_FILE="$(mktemp)"
 
 cleanup() {
-    rm -f "$CERT_FILE" "$KEY_FILE" "$PEM_FILE"
+    rm -f "$CERT_FILE" "$KEY_FILE" "$PEM_FILE" "$COMMON_VALUES_FILE"
     if [ "$KEEP_CLUSTER" != "true" ] && command -v kind >/dev/null 2>&1; then
         kind delete cluster --name "$CLUSTER_NAME" >/dev/null 2>&1 || true
     fi
@@ -129,6 +130,39 @@ wait_for_lb_ip() {
     return 1
 }
 
+collect_pod_metrics() {
+    ns="$1"
+    out=""
+    for pod in $(kubectl get pods -n "$ns" -l app.kubernetes.io/name=daviante-doh -o jsonpath='{.items[*].metadata.name}'); do
+        pod_ip=$(kubectl get pod "$pod" -n "$ns" -o jsonpath='{.status.podIP}')
+        reqs=$(docker exec "${CLUSTER_NAME}-control-plane" curl -ksS --max-time 10 "https://${pod_ip}:3000/metrics" | awk '/^daviante_doh_requests_total / {print $2}')
+        out="${out}${pod}=${reqs:-0} "
+    done
+    echo "$out" | sed 's/ *$//'
+}
+
+cat > "$COMMON_VALUES_FILE" <<EOF
+replicaCount: 2
+image:
+  repository: "${IMAGE_REPO}"
+  tag: "${IMAGE_VERSION}"
+  pullPolicy: Never
+tls:
+  enabled: true
+  secretName: daviante-doh-tls
+config:
+  listenAddress: "0.0.0.0:3000"
+  serverAddress: "1.1.1.1:53,8.8.8.8:53,9.9.9.9:53"
+  cacheSize: "4096"
+  enableMetrics: "true"
+  maxClients: "2048"
+  maxConcurrent: "1024"
+  rateLimitRps: "100"
+  rateLimitBurst: "150"
+  enableEcs: "false"
+  trustedProxies: "10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,127.0.0.0/8"
+EOF
+
 # -----------------------------------------------------------------------------
 # 3. Environment 2: Kubernetes Deployment (2 Replicas + MetalLB LoadBalancer + L7 Ingress)
 # -----------------------------------------------------------------------------
@@ -140,14 +174,9 @@ kubectl create secret generic daviante-doh-haproxy-pem -n daviante-doh-k8s --fro
 
 helm upgrade --install daviante-doh ./charts/daviante-doh \
     --namespace daviante-doh-k8s \
-    --set replicaCount=2 \
-    --set image.repository="$IMAGE_REPO" \
-    --set image.tag="$IMAGE_VERSION" \
-    --set image.pullPolicy=Never \
+    -f "$COMMON_VALUES_FILE" \
     --set service.type=LoadBalancer \
     --set service.port=8443 \
-    --set tls.enabled=true \
-    --set tls.secretName=daviante-doh-tls \
     --set ingress.enabled=true \
     --set ingress.className=haproxy \
     --set ingress.hosts[0].host=doh.k8s.local \
@@ -155,16 +184,6 @@ helm upgrade --install daviante-doh ./charts/daviante-doh \
     --set ingress.hosts[0].paths[0].pathType=Exact \
     --set ingress.hosts[0].paths[1].path=/.well-known/odohconfigs \
     --set ingress.hosts[0].paths[1].pathType=Exact \
-    --set config.listenAddress="0.0.0.0:3000" \
-    --set config.serverAddress="1.1.1.1:53\,8.8.8.8:53\,9.9.9.9:53" \
-    --set config.cacheSize="4096" \
-    --set config.enableMetrics="true" \
-    --set config.maxClients="2048" \
-    --set config.maxConcurrent="1024" \
-    --set config.rateLimitRps="100" \
-    --set config.rateLimitBurst="150" \
-    --set config.enableEcs="false" \
-    --set config.trustedProxies="10.0.0.0/8\,172.16.0.0/12\,192.168.0.0/16\,127.0.0.0/8" \
     --wait --timeout 120s
 
 K8S_LB_VIP=$(wait_for_lb_ip daviante-doh-k8s daviante-doh)
@@ -264,16 +283,11 @@ DOH_REPLICA_COUNT="2" \
 node ./scripts/e2e/live-api-suite.mjs
 
 # Collect per-pod request distribution across the 2 Kubernetes replicas
-K8S_POD_METRICS=""
-for pod in $(kubectl get pods -n daviante-doh-k8s -l app.kubernetes.io/name=daviante-doh -o jsonpath='{.items[*].metadata.name}'); do
-    pod_ip=$(kubectl get pod "$pod" -n daviante-doh-k8s -o jsonpath='{.status.podIP}')
-    reqs=$(curl -ksS "https://${pod_ip}:3000/metrics" | awk '/^daviante_doh_requests_total / {print $2}')
-    K8S_POD_METRICS="${K8S_POD_METRICS}${pod}=${reqs:-0} "
-done
+K8S_POD_METRICS=$(collect_pod_metrics daviante-doh-k8s)
 echo "    Kubernetes Per-Pod Request Distribution: ${K8S_POD_METRICS}"
 kubectl get pods,svc,ingress -n daviante-doh-k8s -o wide > ./test-evidence/kubernetes/cluster-resources.txt
 kubectl logs -n daviante-doh-k8s -l app.kubernetes.io/name=daviante-doh --tail=200 > ./test-evidence/kubernetes/container-logs.txt 2>&1 || true
-printf '{"serviceLbVip":"%s","ingressLbVip":"%s","podDistribution":"%s"}\n' "$K8S_LB_VIP" "$K8S_INGRESS_VIP" "$(echo "$K8S_POD_METRICS" | sed 's/ *$//')" > ./test-evidence/kubernetes/cluster-telemetry.json
+printf '{"serviceLbVip":"%s","ingressLbVip":"%s","podDistribution":"%s"}\n' "$K8S_LB_VIP" "$K8S_INGRESS_VIP" "$K8S_POD_METRICS" > ./test-evidence/kubernetes/cluster-telemetry.json
 
 # -----------------------------------------------------------------------------
 # 4. Environment 3: Red Hat OpenShift Mode (Route CRD + HAProxy Router + restricted-v2 SCC)
@@ -320,10 +334,7 @@ kubectl create secret generic daviante-doh-haproxy-pem -n daviante-doh-openshift
 
 helm upgrade --install daviante-doh ./charts/daviante-doh \
     --namespace daviante-doh-openshift \
-    --set replicaCount=2 \
-    --set image.repository="$IMAGE_REPO" \
-    --set image.tag="$IMAGE_VERSION" \
-    --set image.pullPolicy=Never \
+    -f "$COMMON_VALUES_FILE" \
     --set podSecurityContext.runAsNonRoot=true \
     --set podSecurityContext.runAsUser=20001 \
     --set podSecurityContext.runAsGroup=0 \
@@ -331,22 +342,10 @@ helm upgrade --install daviante-doh ./charts/daviante-doh \
     --set podSecurityContext.seccompProfile.type=RuntimeDefault \
     --set service.type=ClusterIP \
     --set service.port=8443 \
-    --set tls.enabled=true \
-    --set tls.secretName=daviante-doh-tls \
     --set route.enabled=true \
     --set route.host=doh.apps.openshift.local \
     --set route.tls.enabled=true \
-    --set route.tls.termination=edge \
-    --set config.listenAddress="0.0.0.0:3000" \
-    --set config.serverAddress="1.1.1.1:53\,8.8.8.8:53\,9.9.9.9:53" \
-    --set config.cacheSize="4096" \
-    --set config.enableMetrics="true" \
-    --set config.maxClients="2048" \
-    --set config.maxConcurrent="1024" \
-    --set config.rateLimitRps="100" \
-    --set config.rateLimitBurst="150" \
-    --set config.enableEcs="false" \
-    --set config.trustedProxies="10.0.0.0/8\,172.16.0.0/12\,192.168.0.0/16\,127.0.0.0/8" \
+    --set route.tls.termination=reencrypt \
     --wait --timeout 120s
 
 # Verify OpenShift Route CRD resource was created with reencrypt termination
@@ -455,15 +454,10 @@ DOH_REPLICA_COUNT="2" \
 node ./scripts/e2e/live-api-suite.mjs
 
 # Collect per-pod request distribution across the 2 OpenShift replicas
-OCP_POD_METRICS=""
-for pod in $(kubectl get pods -n daviante-doh-openshift -l app.kubernetes.io/name=daviante-doh -o jsonpath='{.items[*].metadata.name}'); do
-    pod_ip=$(kubectl get pod "$pod" -n daviante-doh-openshift -o jsonpath='{.status.podIP}')
-    reqs=$(curl -ksS "https://${pod_ip}:3000/metrics" | awk '/^daviante_doh_requests_total / {print $2}')
-    OCP_POD_METRICS="${OCP_POD_METRICS}${pod}=${reqs:-0} "
-done
+OCP_POD_METRICS=$(collect_pod_metrics daviante-doh-openshift)
 echo "    OpenShift Per-Pod Request Distribution: ${OCP_POD_METRICS}"
 kubectl get pods,svc,route.route.openshift.io -n daviante-doh-openshift -o wide > ./test-evidence/openshift/cluster-resources.txt
 kubectl logs -n daviante-doh-openshift -l app.kubernetes.io/name=daviante-doh --tail=200 > ./test-evidence/openshift/container-logs.txt 2>&1 || true
-printf '{"routerLbVip":"%s","routeHost":"%s","routeTermination":"%s","podDistribution":"%s"}\n' "$OCP_ROUTER_VIP" "$ROUTE_HOST" "$ROUTE_TERM" "$(echo "$OCP_POD_METRICS" | sed 's/ *$//')" > ./test-evidence/openshift/cluster-telemetry.json
+printf '{"routerLbVip":"%s","routeHost":"%s","routeTermination":"%s","podDistribution":"%s"}\n' "$OCP_ROUTER_VIP" "$ROUTE_HOST" "$ROUTE_TERM" "$OCP_POD_METRICS" > ./test-evidence/openshift/cluster-telemetry.json
 
 echo "==> All Kubernetes and OpenShift Black-Box API & Protocol tests completed!"
