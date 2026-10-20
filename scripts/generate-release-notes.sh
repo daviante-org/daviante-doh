@@ -34,7 +34,7 @@ if git rev-parse -q --verify "refs/tags/${TAG}" >/dev/null 2>&1; then
     OBJ_TYPE="$(git for-each-ref "refs/tags/${TAG}" --format='%(objecttype)')"
     if [ "${OBJ_TYPE}" = "tag" ]; then
         RAW_SUBJ="$(git for-each-ref "refs/tags/${TAG}" --format='%(contents:subject)')"
-        RAW_BODY="$(git for-each-ref "refs/tags/${TAG}" --format='%(contents:body)')"
+        RAW_BODY="$(git for-each-ref "refs/tags/${TAG}" --format='%(contents:body)' | sed '/^-----BEGIN PGP SIGNATURE-----$/,$d' | sed '/^-----BEGIN SSH SIGNATURE-----$/,$d')"
         # Ignore default auto-generated placeholder messages like "Release v0.1.0"
         if [ -n "${RAW_SUBJ}" ] && [ "${RAW_SUBJ}" != "Release ${TAG}" ] && [ "${RAW_SUBJ}" != "${TAG}" ]; then
             TAG_SUBJECT="${RAW_SUBJ}"
@@ -105,22 +105,12 @@ fi
 HIGHLIGHTS_CONTENT=""
 if [ -n "${RELEASE_NOTES_BODY:-}" ]; then
     HIGHLIGHTS_CONTENT="${RELEASE_NOTES_BODY}"
-elif [ -n "${TAG_BODY}" ]; then
-    if [ -n "${TAG_SUBJECT}" ] && [ "${TAG_BODY}" != "${TAG_SUBJECT}" ]; then
-        HIGHLIGHTS_CONTENT="### ${TAG_SUBJECT}
-
-${TAG_BODY}"
-    else
-        HIGHLIGHTS_CONTENT="${TAG_BODY}"
-    fi
-    # If CHANGELOG_SECTION also has structured details not identical to TAG_BODY, append it
-    if [ -n "${CHANGELOG_SECTION}" ]; then
-        HIGHLIGHTS_CONTENT="${HIGHLIGHTS_CONTENT}
-
-${CHANGELOG_SECTION}"
-    fi
+elif [ -n "${TAG_BODY}" ] && [ "${TAG_BODY}" != "${TAG_SUBJECT}" ]; then
+    HIGHLIGHTS_CONTENT="${TAG_BODY}"
 elif [ -n "${CHANGELOG_SECTION}" ]; then
     HIGHLIGHTS_CONTENT="${CHANGELOG_SECTION}"
+elif [ -n "${TAG_SUBJECT}" ]; then
+    HIGHLIGHTS_CONTENT="${TAG_SUBJECT}"
 else
     HIGHLIGHTS_CONTENT="Production release \`${TAG}\` of \`${REPO_NAME}\`."
 fi

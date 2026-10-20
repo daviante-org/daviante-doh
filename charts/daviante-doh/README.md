@@ -10,7 +10,7 @@
 
 ## Overview
 
-This directory contains the official Helm chart for **`daviante-doh`** (`0.1.0`), designed to deploy seamlessly on both **standard Kubernetes (`v1.26+`)** and **Red Hat OpenShift (`4.12+` with `restricted-v2` SCC)** without chart modifications.
+This directory contains the official Helm chart for **`daviante-doh`** (`0.2.0`), designed to deploy seamlessly on both **standard Kubernetes (`v1.26+`)** and **Red Hat OpenShift (`4.12+` with `restricted-v2` SCC)** without chart modifications.
 
 ### Included Kubernetes & OpenShift Resources
 - [`templates/deployment.yaml`](templates/deployment.yaml) — Rootless `Deployment` with pod anti-affinity, `/livez` & `/readyz` HTTP/HTTPS probes, and automatic ConfigMap checksum rollouts.
@@ -33,7 +33,7 @@ This directory contains the official Helm chart for **`daviante-doh`** (`0.1.0`)
 ```bash
 # Install directly from GHCR OCI Registry (or replace with ./charts/daviante-doh for local source)
 helm upgrade --install daviante-doh oci://ghcr.io/daviante-org/charts/daviante-doh \
-  --version 0.1.0 \
+  --version 0.2.0 \
   --namespace daviante-doh --create-namespace \
   --set config.serverAddress="9.9.9.9:53\,1.1.1.1:53" \
   --set config.cacheSize="10000" \
@@ -43,7 +43,7 @@ helm upgrade --install daviante-doh oci://ghcr.io/daviante-org/charts/daviante-d
 ### 2. Red Hat OpenShift (`restricted-v2` SCC + `Route`)
 ```bash
 helm upgrade --install daviante-doh oci://ghcr.io/daviante-org/charts/daviante-doh \
-  --version 0.1.0 \
+  --version 0.2.0 \
   --namespace daviante-doh \
   --set route.enabled=true \
   --set route.host="doh.apps.cluster.example.com" \
@@ -68,7 +68,7 @@ helm upgrade --install daviante-doh ./charts/daviante-doh \
 | `replicaCount` | `int` | `2` | Number of `daviante-doh` Pod replicas |
 | `image.repository` | `string` | `"ghcr.io/daviante-org/daviante-doh"` | Container image repository |
 | `image.pullPolicy` | `string` | `"IfNotPresent"` | Image pull policy (`IfNotPresent`, `Always`, `Never`) |
-| `image.tag` | `string` | `"0.1.0"` | Container image tag |
+| `image.tag` | `string` | `"0.2.0"` | Container image tag |
 | `serviceAccount.create` | `bool` | `true` | Create dedicated `ServiceAccount` (`automountServiceAccountToken: false`) |
 | `config.listenAddress` | `string` | `"0.0.0.0:3000"` | Primary DoH/ODoH/JSON socket bind address (`DOH_LISTEN_ADDRESS`) |
 | `config.adminListenAddress` | `string` | `""` | Optional isolated admin listener for `/metrics` & probes (`DOH_ADMIN_LISTEN_ADDRESS`) |

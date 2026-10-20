@@ -6,7 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ---
 
-## [Unreleased]
+## [0.2.0] - 2026-10-21
+
+### Summary
+Feature, resiliency, and security release introducing **RFC 8767 Serve-Stale & 10% TTL Proactive Cache Prefetching**, **Singleflight In-Flight Query Coalescing**, **Multi-Strategy Upstream Load Balancing (ailover, ound-robin, parallel) & RFC 7858 Upstream DNS-over-TLS (:853)**, **DNS Rebinding Protection, Local Split-Horizon /etc/hosts & Lock-Free Policy Hot-Reloading**, **OpenAPI 3.1.0 Specification**, and **Dynamic Release Notes Generation**.
 
 ### Added
 - **RFC 8767 Serve-Stale & Proactive 10% TTL Cache Prefetching (`src/cache.rs`, `src/http/handler.rs`)**:

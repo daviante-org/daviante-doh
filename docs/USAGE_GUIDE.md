@@ -363,7 +363,7 @@ Add `daviante-doh` to your `Cargo.toml` with `default-features = false` for a pu
 
 ```toml
 [dependencies]
-daviante-doh = { version = "0.1.0", default-features = false, features = ["tls"] }
+daviante-doh = { version = "0.2.0", default-features = false, features = ["tls"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "signal"] }
 ```
 

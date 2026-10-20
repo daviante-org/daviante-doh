@@ -187,7 +187,7 @@ podman run -d --name daviante-doh \
 ```bash
 # Standard Kubernetes via GHCR OCI Registry (LoadBalancer + Ingress + 10k Cache)
 helm upgrade --install daviante-doh oci://ghcr.io/daviante-org/charts/daviante-doh \
-  --version 0.1.0 \
+  --version 0.2.0 \
   --namespace daviante-doh --create-namespace \
   --set service.type=LoadBalancer \
   --set config.serverAddress="9.9.9.9:53\,1.1.1.1:53" \
@@ -195,7 +195,7 @@ helm upgrade --install daviante-doh oci://ghcr.io/daviante-org/charts/daviante-d
 
 # Red Hat OpenShift (restricted-v2 SCC compatible out-of-the-box + OpenShift Route)
 helm upgrade --install daviante-doh oci://ghcr.io/daviante-org/charts/daviante-doh \
-  --version 0.1.0 \
+  --version 0.2.0 \
   --namespace daviante-doh \
   --set route.enabled=true \
   --set route.host="doh.apps.ocp.example.com"
@@ -222,7 +222,7 @@ curl -fsS "http://127.0.0.1:3000/metrics"
 ### 4. Embedding as a Pure Rust Library (`daviante_doh`)
 ```toml
 [dependencies]
-daviante-doh = { version = "0.1.0", default-features = false, features = ["tls"] }
+daviante-doh = { version = "0.2.0", default-features = false, features = ["tls"] }
 ```
 
 ```rust

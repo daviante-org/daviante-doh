@@ -107,7 +107,7 @@ kubectl create secret tls daviante-doh-tls \
 
 # 2. Install Helm release from GHCR OCI Registry (or use ./charts/daviante-doh from a local clone)
 helm upgrade --install daviante-doh oci://ghcr.io/daviante-org/charts/daviante-doh \
-  --version 0.1.0 \
+  --version 0.2.0 \
   --namespace daviante-doh \
   --set replicaCount=2 \
   --set service.type=LoadBalancer \
@@ -143,7 +143,7 @@ oc create secret tls daviante-doh-tls --cert=tls.crt --key=tls.key
 
 # 2. Deploy from GHCR OCI Registry with OpenShift Route (reencrypt TLS termination)
 helm upgrade --install daviante-doh oci://ghcr.io/daviante-org/charts/daviante-doh \
-  --version 0.1.0 \
+  --version 0.2.0 \
   --namespace daviante-doh \
   --set replicaCount=2 \
   --set tls.enabled=true \
