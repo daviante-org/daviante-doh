@@ -32,7 +32,7 @@ pub use crate::metrics::DohMetrics;
 pub use crate::policy::{BlockAction, DomainPolicy, IpRateLimiter};
 #[cfg(feature = "tls")]
 pub use crate::tls::TlsMinVersion;
-pub use crate::upstream::{UpstreamSet, CIRCUIT_BREAKER_COOLDOWN};
+pub use crate::upstream::{UpstreamSet, UpstreamStrategy, CIRCUIT_BREAKER_COOLDOWN};
 
 use std::collections::HashMap;
 use std::future::Future;
@@ -115,6 +115,11 @@ pub struct DohConfig {
     pub stale_if_error_secs: u32,
     pub stale_while_revalidate_secs: u32,
     pub cache_size: usize,
+    pub serve_stale_ttl: u32,
+    pub cache_prefetch: bool,
+    pub coalesce_queries: bool,
+    pub upstream_strategy: UpstreamStrategy,
+    pub upstream_dot_sni: Option<String>,
     pub keepalive: bool,
     pub disable_post: bool,
     pub allow_odoh_post: bool,
@@ -125,7 +130,9 @@ pub struct DohConfig {
     pub odoh_rotation_secs: u32,
     pub allowlist_file: Option<PathBuf>,
     pub blocklist_file: Option<PathBuf>,
+    pub hosts_file: Option<PathBuf>,
     pub block_action: BlockAction,
+    pub block_private_rebinding: bool,
     pub rate_limit_rps: u32,
     pub rate_limit_burst: u32,
     pub rate_limit_v6_prefix: u8,
@@ -163,6 +170,11 @@ impl Default for DohConfig {
             stale_if_error_secs: 86_400,
             stale_while_revalidate_secs: 60,
             cache_size: 0,
+            serve_stale_ttl: 0,
+            cache_prefetch: false,
+            coalesce_queries: true,
+            upstream_strategy: UpstreamStrategy::Failover,
+            upstream_dot_sni: None,
             keepalive: true,
             disable_post: false,
             allow_odoh_post: false,
@@ -173,7 +185,9 @@ impl Default for DohConfig {
             odoh_rotation_secs: 86_400,
             allowlist_file: None,
             blocklist_file: None,
+            hosts_file: None,
             block_action: BlockAction::Nxdomain,
+            block_private_rebinding: false,
             rate_limit_rps: 0,
             rate_limit_burst: 20,
             rate_limit_v6_prefix: 64,
@@ -414,6 +428,14 @@ where
     F: Future<Output = ()> + Send,
 {
     engine.config.validate()?;
+    engine.policy.spawn_reload_watcher(
+        engine.config.allowlist_file.clone(),
+        engine.config.blocklist_file.clone(),
+        engine.config.hosts_file.clone(),
+        engine.config.block_action,
+        engine.config.block_private_rebinding,
+        Duration::from_secs(30),
+    );
     let client_limiter = Arc::new(Semaphore::new(engine.config.max_clients));
     let ip_limiter = PerIpConnLimiter::new(
         engine.config.max_conns_per_ip,

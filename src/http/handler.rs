@@ -35,7 +35,9 @@ use crate::dns::wire::{
 use crate::error::DohError;
 use crate::metrics::DohMetrics;
 use crate::policy::{DomainPolicy, IpRateLimiter};
-use crate::upstream::{resolve_upstream_with_set, ResolvedDnsPacket, UpstreamSet};
+use crate::upstream::{
+    resolve_upstream_coalesced, resolve_upstream_with_set, ResolvedDnsPacket, UpstreamSet,
+};
 use crate::{ClientIpLogMode, DohConfig};
 
 pub const MIME_DNS_MESSAGE: &str = "application/dns-message";
@@ -81,11 +83,13 @@ impl DohEngine {
             DohError::InvalidConfig(format!("invalid cors_allow_origin header: {e}"))
         })?;
         let tcp_slots = (config.max_clients / 4).max(8);
-        let cache = DnsCache::new(config.cache_size);
-        let policy = DomainPolicy::from_files(
+        let cache = DnsCache::with_serve_stale(config.cache_size, config.serve_stale_ttl);
+        let policy = DomainPolicy::from_files_full(
             config.allowlist_file.as_deref(),
             config.blocklist_file.as_deref(),
+            config.hosts_file.as_deref(),
             config.block_action,
+            config.block_private_rebinding,
         )?;
         let rate_limiter = IpRateLimiter::with_v6_prefix(
             config.rate_limit_rps,
@@ -587,6 +591,29 @@ impl DohEngine {
             );
         }
 
+        // 2b. Local Split-Horizon Hosts File Override (--hosts-file)
+        let hosts_ttl = self.config.min_ttl.max(60);
+        if let Some(unpadded) =
+            self.policy
+                .try_resolve_hosts(&query, &parsed.qname, parsed.qtype, hosts_ttl)?
+        {
+            let mut client_wire = unpadded.clone();
+            finalize_wire_response_for_client(&mut client_wire, parsed.has_edns0);
+            self.metrics.inc_hosts_hit();
+            let rc = rcode(&unpadded);
+            self.metrics.record_rcode(rc);
+            self.emit_audit_log(&parsed.qname, parsed.qtype, rc, "hosts_file", client_ip);
+            return Ok(ResolvedDnsPacket {
+                wire_bytes: client_wire,
+                unpadded_wire_bytes: unpadded,
+                cache_ttl: hosts_ttl,
+                internal_cache_ttl: hosts_ttl,
+                age_secs: 0,
+                ecs_attached: false,
+                cacheable: false,
+            });
+        }
+
         // 3. In-memory DNS Response Cache lookup (when enabled and neither server ECS nor client ECS is active, H-3)
         let cache_key = CacheKey {
             qname: parsed.qname.clone(),
@@ -613,6 +640,21 @@ impl DohEngine {
                         client_ip,
                     );
                 }
+                if self
+                    .policy
+                    .is_rebinding_blocked(&parsed.qname, &hit.unpadded_wire_bytes)
+                {
+                    return self.synthesize_rebinding_blocked(
+                        &query,
+                        &parsed.qname,
+                        parsed.qtype,
+                        parsed.has_edns0,
+                        client_ip,
+                    );
+                }
+                if self.config.cache_prefetch && hit.should_prefetch {
+                    self.spawn_cache_prefetch(cache_key.clone(), query.clone());
+                }
                 self.metrics.inc_cache_hit();
                 let rc = rcode(&hit.unpadded_wire_bytes);
                 self.metrics.record_rcode(rc);
@@ -630,10 +672,13 @@ impl DohEngine {
             self.metrics.inc_cache_miss();
         }
 
-        // 4. Upstream UDP/TCP resolution with circuit-breaker failover
+        // 4. Upstream UDP/TCP/DoT resolution with Singleflight Coalescing, Load-Balancing, and RFC 8767 Serve-Stale
         let ecs_ip = self.config.enable_ecs.then_some(client_ip).flatten();
-        let resolved = match resolve_upstream_with_set(
+        let coalesce_key =
+            (self.config.coalesce_queries && !bypass_cache_for_ecs).then_some(&cache_key);
+        let resolved = match resolve_upstream_coalesced(
             query.clone(),
+            coalesce_key,
             ecs_ip,
             &self.config,
             &self.upstreams,
@@ -645,6 +690,18 @@ impl DohEngine {
         {
             Ok(r) => r,
             Err(DohError::UpstreamTimeout) => {
+                if let Some(stale) = self.try_serve_stale(
+                    &cache_key,
+                    &query,
+                    &parsed.qname,
+                    parsed.qtype,
+                    parsed.question_end_offset,
+                    parsed.has_edns0,
+                    bypass_cache_for_ecs,
+                    client_ip,
+                ) {
+                    return Ok(stale);
+                }
                 return self.synthesize_upstream_servfail(
                     &query,
                     &parsed.qname,
@@ -656,6 +713,18 @@ impl DohEngine {
                 );
             }
             Err(DohError::UpstreamError(_)) | Err(DohError::Io(_)) => {
+                if let Some(stale) = self.try_serve_stale(
+                    &cache_key,
+                    &query,
+                    &parsed.qname,
+                    parsed.qtype,
+                    parsed.question_end_offset,
+                    parsed.has_edns0,
+                    bypass_cache_for_ecs,
+                    client_ip,
+                ) {
+                    return Ok(stale);
+                }
                 return self.synthesize_upstream_servfail(
                     &query,
                     &parsed.qname,
@@ -669,7 +738,7 @@ impl DohEngine {
             Err(other) => return Err(other),
         };
 
-        // 5. N-4: Protective DNS CNAME / DNAME answer chain inspection
+        // 5. N-4: Protective DNS CNAME / DNAME answer chain inspection & DNS Rebinding Protection
         if self.policy.is_answer_blocked(&resolved.unpadded_wire_bytes) {
             return self.synthesize_policy_blocked(
                 &query,
@@ -677,6 +746,18 @@ impl DohEngine {
                 parsed.qtype,
                 parsed.has_edns0,
                 "policy_blocked_cname",
+                client_ip,
+            );
+        }
+        if self
+            .policy
+            .is_rebinding_blocked(&parsed.qname, &resolved.unpadded_wire_bytes)
+        {
+            return self.synthesize_rebinding_blocked(
+                &query,
+                &parsed.qname,
+                parsed.qtype,
+                parsed.has_edns0,
                 client_ip,
             );
         }
@@ -694,6 +775,115 @@ impl DohEngine {
         self.metrics.record_rcode(rc);
         self.emit_audit_log(&parsed.qname, parsed.qtype, rc, "upstream", client_ip);
         Ok(resolved)
+    }
+
+    fn spawn_cache_prefetch(&self, cache_key: CacheKey, query: Vec<u8>) {
+        self.metrics.inc_cache_prefetch();
+        let cfg = Arc::clone(&self.config);
+        let upstreams = self.upstreams.clone();
+        let tcp_limiter = Arc::clone(&self.tcp_limiter);
+        let metrics = self.metrics.clone();
+        let cache = self.cache.clone();
+        let policy = self.policy.clone();
+        tokio::spawn(async move {
+            let deadline = Instant::now() + cfg.timeout;
+            if let Ok(resolved) = resolve_upstream_with_set(
+                query,
+                None,
+                &cfg,
+                &upstreams,
+                &tcp_limiter,
+                &metrics,
+                deadline,
+            )
+            .await
+            {
+                if resolved.cacheable
+                    && !policy.is_answer_blocked(&resolved.unpadded_wire_bytes)
+                    && !policy.is_rebinding_blocked(&cache_key.qname, &resolved.unpadded_wire_bytes)
+                {
+                    cache.insert_with_floor(
+                        cache_key,
+                        resolved.unpadded_wire_bytes,
+                        resolved.cache_ttl,
+                        resolved.internal_cache_ttl,
+                    );
+                }
+            }
+        });
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn try_serve_stale(
+        &self,
+        cache_key: &CacheKey,
+        query: &[u8],
+        qname: &str,
+        qtype: u16,
+        question_end_offset: usize,
+        client_has_edns0: bool,
+        bypass_cache_for_ecs: bool,
+        client_ip: Option<IpAddr>,
+    ) -> Option<ResolvedDnsPacket> {
+        if !self.cache.is_enabled() || bypass_cache_for_ecs {
+            return None;
+        }
+        let stale_hit = self.cache.get_stale_for_query(
+            cache_key,
+            query,
+            question_end_offset,
+            client_has_edns0,
+        )?;
+        if self
+            .policy
+            .is_answer_blocked(&stale_hit.unpadded_wire_bytes)
+            || self
+                .policy
+                .is_rebinding_blocked(qname, &stale_hit.unpadded_wire_bytes)
+        {
+            return None;
+        }
+        self.metrics.inc_cache_stale_hit();
+        let rc = rcode(&stale_hit.unpadded_wire_bytes);
+        self.metrics.record_rcode(rc);
+        self.emit_audit_log(qname, qtype, rc, "cache_stale", client_ip);
+        Some(ResolvedDnsPacket {
+            wire_bytes: stale_hit.wire_bytes,
+            unpadded_wire_bytes: stale_hit.unpadded_wire_bytes,
+            cache_ttl: stale_hit.remaining_ttl,
+            internal_cache_ttl: stale_hit.remaining_ttl,
+            age_secs: stale_hit.age_secs,
+            ecs_attached: false,
+            cacheable: false,
+        })
+    }
+
+    fn synthesize_rebinding_blocked(
+        &self,
+        query: &[u8],
+        qname: &str,
+        qtype: u16,
+        client_has_edns0: bool,
+        client_ip: Option<IpAddr>,
+    ) -> Result<ResolvedDnsPacket, DohError> {
+        self.metrics.inc_rebinding_blocked();
+        self.metrics.inc_policy_blocked();
+        let ttl = self.config.err_ttl.max(self.config.min_ttl);
+        let unpadded = self.policy.build_rebinding_blocked_response(query, ttl)?;
+        let mut client_wire = unpadded.clone();
+        finalize_wire_response_for_client(&mut client_wire, client_has_edns0);
+        let rc = rcode(&unpadded);
+        self.metrics.record_rcode(rc);
+        self.emit_audit_log(qname, qtype, rc, "rebinding_blocked", client_ip);
+        Ok(ResolvedDnsPacket {
+            wire_bytes: client_wire,
+            unpadded_wire_bytes: unpadded,
+            cache_ttl: ttl,
+            internal_cache_ttl: ttl,
+            age_secs: 0,
+            ecs_attached: false,
+            cacheable: false,
+        })
     }
 
     fn synthesize_policy_blocked(

@@ -30,6 +30,8 @@ spec:
           port: 53
         - protocol: TCP
           port: 53
+        - protocol: TCP
+          port: 853
       to:
         {{- range (splitList "," .Values.config.serverAddress) }}
         {{- $addr := trim . -}}

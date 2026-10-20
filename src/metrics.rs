@@ -88,10 +88,16 @@ pub struct DohMetricsInner {
     pub rcode_other_total: AtomicU64,
     pub cache_hits_total: AtomicU64,
     pub cache_misses_total: AtomicU64,
+    pub cache_stale_hits_total: AtomicU64,
+    pub cache_prefetch_total: AtomicU64,
+    pub coalesced_queries_total: AtomicU64,
     pub policy_blocked_total: AtomicU64,
+    pub rebinding_blocked_total: AtomicU64,
+    pub hosts_hits_total: AtomicU64,
     pub rate_limited_total: AtomicU64,
     pub upstream_udp_total: AtomicU64,
     pub upstream_tcp_total: AtomicU64,
+    pub upstream_dot_total: AtomicU64,
     pub upstream_failures_total: AtomicU64,
     pub connections_active: AtomicU64,
     pub hist_wire: LatencyHistogram,
@@ -220,10 +226,43 @@ impl DohMetrics {
     }
 
     #[inline]
+    pub fn inc_cache_stale_hit(&self) {
+        self.inner
+            .cache_stale_hits_total
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    #[inline]
+    pub fn inc_cache_prefetch(&self) {
+        self.inner
+            .cache_prefetch_total
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    #[inline]
+    pub fn inc_coalesced_query(&self) {
+        self.inner
+            .coalesced_queries_total
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    #[inline]
     pub fn inc_policy_blocked(&self) {
         self.inner
             .policy_blocked_total
             .fetch_add(1, Ordering::Relaxed);
+    }
+
+    #[inline]
+    pub fn inc_rebinding_blocked(&self) {
+        self.inner
+            .rebinding_blocked_total
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    #[inline]
+    pub fn inc_hosts_hit(&self) {
+        self.inner.hosts_hits_total.fetch_add(1, Ordering::Relaxed);
     }
 
     #[inline]
@@ -244,6 +283,13 @@ impl DohMetrics {
     pub fn inc_upstream_tcp(&self) {
         self.inner
             .upstream_tcp_total
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    #[inline]
+    pub fn inc_upstream_dot(&self) {
+        self.inner
+            .upstream_dot_total
             .fetch_add(1, Ordering::Relaxed);
     }
 
@@ -318,9 +364,24 @@ impl DohMetrics {
                 "# HELP daviante_doh_cache_misses_total Total in-memory DNS cache misses.\n",
                 "# TYPE daviante_doh_cache_misses_total counter\n",
                 "daviante_doh_cache_misses_total {}\n",
+                "# HELP daviante_doh_cache_stale_hits_total Total expired cached responses served under RFC 8767 Serve-Stale.\n",
+                "# TYPE daviante_doh_cache_stale_hits_total counter\n",
+                "daviante_doh_cache_stale_hits_total {}\n",
+                "# HELP daviante_doh_cache_prefetch_total Total background cache prefetch refreshes triggered.\n",
+                "# TYPE daviante_doh_cache_prefetch_total counter\n",
+                "daviante_doh_cache_prefetch_total {}\n",
+                "# HELP daviante_doh_coalesced_queries_total Total concurrent cache-miss queries deduplicated via Singleflight.\n",
+                "# TYPE daviante_doh_coalesced_queries_total counter\n",
+                "daviante_doh_coalesced_queries_total {}\n",
                 "# HELP daviante_doh_policy_blocked_total Total DNS queries blocked by Protective DNS policy.\n",
                 "# TYPE daviante_doh_policy_blocked_total counter\n",
                 "daviante_doh_policy_blocked_total {}\n",
+                "# HELP daviante_doh_rebinding_blocked_total Total DNS responses blocked by DNS Rebinding Protection.\n",
+                "# TYPE daviante_doh_rebinding_blocked_total counter\n",
+                "daviante_doh_rebinding_blocked_total {}\n",
+                "# HELP daviante_doh_hosts_hits_total Total DNS queries answered from local split-horizon hosts overrides.\n",
+                "# TYPE daviante_doh_hosts_hits_total counter\n",
+                "daviante_doh_hosts_hits_total {}\n",
                 "# HELP daviante_doh_rate_limited_total Total requests rejected due to per-IP rate limiting.\n",
                 "# TYPE daviante_doh_rate_limited_total counter\n",
                 "daviante_doh_rate_limited_total {}\n",
@@ -331,6 +392,7 @@ impl DohMetrics {
                 "# TYPE daviante_doh_upstream_queries_total counter\n",
                 "daviante_doh_upstream_queries_total{{transport=\"udp\"}} {}\n",
                 "daviante_doh_upstream_queries_total{{transport=\"tcp\"}} {}\n",
+                "daviante_doh_upstream_queries_total{{transport=\"dot\"}} {}\n",
             ),
             i.requests_wire_total.load(Ordering::Relaxed),
             i.requests_json_total.load(Ordering::Relaxed),
@@ -347,11 +409,17 @@ impl DohMetrics {
             i.rcode_other_total.load(Ordering::Relaxed),
             i.cache_hits_total.load(Ordering::Relaxed),
             i.cache_misses_total.load(Ordering::Relaxed),
+            i.cache_stale_hits_total.load(Ordering::Relaxed),
+            i.cache_prefetch_total.load(Ordering::Relaxed),
+            i.coalesced_queries_total.load(Ordering::Relaxed),
             i.policy_blocked_total.load(Ordering::Relaxed),
+            i.rebinding_blocked_total.load(Ordering::Relaxed),
+            i.hosts_hits_total.load(Ordering::Relaxed),
             i.rate_limited_total.load(Ordering::Relaxed),
             i.connections_active.load(Ordering::Relaxed),
             i.upstream_udp_total.load(Ordering::Relaxed),
             i.upstream_tcp_total.load(Ordering::Relaxed),
+            i.upstream_dot_total.load(Ordering::Relaxed),
         );
 
         if let Ok(map) = i.upstream_by_target.lock() {

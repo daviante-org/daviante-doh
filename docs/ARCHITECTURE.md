@@ -2,7 +2,7 @@
 
 <div align="center">
 
-**[Project Home](../README.md)** • **[Architecture & UML](ARCHITECTURE.md)** • **[Global Standards & Security](STANDARDS_AND_SECURITY.md)** • **[Usage Guide & Examples](USAGE_GUIDE.md)** • **[Deployment Guide](DEPLOYMENT.md)** • **[Helm Chart](../charts/daviante-doh/README.md)**
+**[Project Home](../README.md)** • **[Architecture & UML](ARCHITECTURE.md)** • **[Global Standards & Security](STANDARDS_AND_SECURITY.md)** • **[Usage Guide & Examples](USAGE_GUIDE.md)** • **[OpenAPI 3.1 Spec](openapi.yaml)** • **[Deployment Guide](DEPLOYMENT.md)** • **[Helm Chart](../charts/daviante-doh/README.md)**
 
 </div>
 
@@ -72,19 +72,20 @@ flowchart TB
         end
 
         subgraph EnterpriseLayer["Caching, Policy & Telemetry"]
-            Cache["src/cache.rs<br/>(16-Shard Clock-Pro/LRU DnsCache)"]
-            Policy["src/policy/mod.rs<br/>(DomainPolicy Allow/Blocklist + IpRateLimiter)"]
+            Cache["src/cache.rs<br/>(16-Shard Clock-Pro/LRU DnsCache + RFC 8767 Serve-Stale & 10% Prefetch)"]
+            Policy["src/policy/mod.rs<br/>(Hot-Reload Allow/Blocklist + Rebinding Guard + Hosts + IpRateLimiter)"]
             Metrics["src/metrics.rs<br/>(Lock-Free AtomicU64 OpenMetrics Registry)"]
         end
 
         subgraph UpstreamLayer["Upstream Resolver Engine"]
-            Upstream["src/upstream/mod.rs<br/>(UpstreamSet + 30s Circuit Breaker + TCP Pool)"]
+            Upstream["src/upstream/mod.rs<br/>(UpstreamSet + Failover/RR/Parallel + Singleflight + TCP/DoT Pool)"]
         end
     end
 
     subgraph Upstreams["Upstream DNS Authorities"]
         UDP["UDP :53 (Connected Socket + CSPRNG TXID)"]
         TCP["TCP :53 (RFC 7766 Persistent Pool on TC=1)"]
+        DoT["TLS :853 (RFC 7858 Persistent DoT Pool)"]
     end
 
     DoHClient --> Server
@@ -109,6 +110,7 @@ flowchart TB
 
     Upstream --> UDP
     Upstream --> TCP
+    Upstream --> DoT
 ```
 
 ---
@@ -140,6 +142,11 @@ classDiagram
         +u32 stale_if_error_secs
         +u32 stale_while_revalidate_secs
         +usize cache_size
+        +u32 serve_stale_ttl
+        +bool cache_prefetch
+        +bool disable_coalescing
+        +UpstreamStrategy upstream_strategy
+        +Option~String~ upstream_dot_sni
         +bool keepalive
         +bool disable_post
         +bool allow_odoh_post
@@ -150,7 +157,9 @@ classDiagram
         +u32 odoh_rotation_secs
         +Option~PathBuf~ allowlist_file
         +Option~PathBuf~ blocklist_file
+        +Option~PathBuf~ hosts_file
         +BlockAction block_action
+        +bool block_private_rebinding
         +u32 rate_limit_rps
         +u32 rate_limit_burst
         +u8 rate_limit_v6_prefix
@@ -175,10 +184,13 @@ classDiagram
 
     class DnsCache {
         -usize max_entries
+        -u32 serve_stale_ttl
         -Array~Mutex~CacheShard~, 16~ shards
-        +new(usize max_entries) DnsCache
+        +with_serve_stale(usize max_entries, u32 serve_stale_ttl) DnsCache
         +is_enabled() bool
         +get_for_query(CacheKey, query, q_end, pad) Option~CacheHit~
+        +get_stale_for_query(CacheKey, query, q_end, pad) Option~CacheHit~
+        +try_claim_prefetch(CacheKey) bool
         +insert_with_floor(CacheKey, wire, min_ttl, floor_ttl)
     }
 
@@ -191,11 +203,13 @@ classDiagram
     }
 
     class DomainPolicy {
-        -Option~DomainSet~ allowlist
-        -Option~DomainSet~ blocklist
-        -BlockAction action
-        +from_files(allow, block, action) Result~DomainPolicy, DohError~
+        -ArcSwap~DomainPolicySnapshot~ inner
+        +from_files_with_options(allow, block, hosts, action, rebinding) Result~DomainPolicy, DohError~
+        +reload_from_files() Result~bool, DohError~
+        +spawn_reload_watcher(Arc~DomainPolicy~, Handle)
         +is_allowed(qname) bool
+        +is_rebinding_blocked(qname, ip) bool
+        +try_resolve_hosts(query, q_end, qname, qtype) Option~Vec~u8~~
         +action() BlockAction
     }
 
@@ -225,23 +239,31 @@ classDiagram
     class UpstreamSet {
         -Vec~UpstreamEndpoint~ endpoints
         -AtomicUsize rr_cursor
-        +new(Vec~SocketAddr~, SocketAddr) UpstreamSet
+        -UpstreamStrategy strategy
+        -Mutex~HashMap~InFlightKey, watch_Receiver~~ in_flight
+        +with_options(Vec~SocketAddr~, SocketAddr, UpstreamStrategy, Option~String~) Result~UpstreamSet, DohError~
         +len() usize
     }
 
     class DohMetrics {
-        +AtomicU64 requests_total
-        +AtomicU64 requests_doh_get
-        +AtomicU64 requests_doh_post
-        +AtomicU64 requests_odoh
-        +AtomicU64 requests_json
-        +AtomicU64 cache_hits
-        +AtomicU64 cache_misses
-        +AtomicU64 policy_blocked
-        +AtomicU64 rate_limited
-        +AtomicU64 upstream_failures
+        +AtomicU64 requests_wire_total
+        +AtomicU64 requests_json_total
+        +AtomicU64 requests_odoh_total
+        +AtomicU64 cache_hits_total
+        +AtomicU64 cache_misses_total
+        +AtomicU64 cache_stale_hits_total
+        +AtomicU64 cache_prefetch_total
+        +AtomicU64 coalesced_queries_total
+        +AtomicU64 policy_blocked_total
+        +AtomicU64 rebinding_blocked_total
+        +AtomicU64 hosts_hits_total
+        +AtomicU64 rate_limited_total
+        +AtomicU64 upstream_udp_total
+        +AtomicU64 upstream_tcp_total
+        +AtomicU64 upstream_dot_total
+        +AtomicU64 upstream_failures_total
         +AtomicU64 connections_active
-        +render_prometheus(cache_enabled) String
+        +render_prometheus() String
     }
 
     DohEngine *-- DohConfig
@@ -301,24 +323,40 @@ sequenceDiagram
         Engine-->>Client: HTTP 200 OK (Synthesized NXDOMAIN+EDE 15 / REFUSED+EDE 18 / 0.0.0.0+EDE 17)
     end
 
+    Engine->>Policy: try_resolve_hosts(query, qname, qtype)
+    alt Local Split-Horizon Hosts Match (A / AAAA / PTR)
+        Policy-->>Engine: Synthesized Authoritative Response (TTL=60)
+        Engine-->>Client: HTTP 200 OK (daviante_doh_hosts_hits_total++)
+    end
+
     alt Cache Lookup Eligible (no client ECS, cache_size > 0)
         Engine->>Cache: get_for_query(CacheKey, client_query, pad_468)
         alt Cache Hit
-            Cache-->>Engine: CacheHit { wire_bytes (TTL decremented, TXID & 0x20 restored), remaining_ttl, age }
+            Cache-->>Engine: CacheHit { wire_bytes, remaining_ttl, age, should_prefetch }
+            opt should_prefetch == true and cache_prefetch == true
+                Engine-)Upstream: Spawn async background prefetch refresh (10% TTL window)
+            end
             Engine-->>Client: HTTP 200 OK (Cache-Control: public, max-age=remaining_ttl, Age: age)
         end
     end
 
     Engine->>Engine: Optional RFC 7871 ECS synthesis (/24 IPv4, /56 IPv6; never leaks RFC 1918/loopback)
-    Engine->>Upstream: resolve_upstream_with_set(wire_query, deadline)
-    Upstream->>DNS: UDP datagram (randomized TXID) or TCP fallback on TC=1
-    DNS-->>Upstream: Raw DNS wire response
-    Upstream-->>Engine: Verified DNS wire response (original TXID & 0x20 QNAME restored)
+    Engine->>Upstream: resolve_upstream_coalesced(wire_query, deadline, key)
+    Note over Upstream,DNS: Singleflight Coalescing + Failover / Round-Robin / Parallel Strategy (UDP :53, TCP :53, or DoT :853)
+    Upstream->>DNS: UDP datagram / TCP stream / TLS 1.3 DoT stream (randomized TXID)
+    alt Upstream Resolution Succeeds
+        DNS-->>Upstream: Raw DNS wire response
+        Upstream-->>Engine: Verified DNS wire response (original TXID & 0x20 QNAME restored)
+    else All Upstreams Fail & serve_stale_ttl > 0
+        Engine->>Cache: get_stale_for_query(CacheKey, client_query, pad_468)
+        Cache-->>Engine: Expired CacheHit (TTL=30) + attach RFC 8914 EDE 3 (Stale Answer)
+        Engine-->>Client: HTTP 200 OK (Stale Response + EDE 3)
+    end
 
-    Engine->>Policy: Inspect Answer CNAME / DNAME targets against DomainPolicy
-    alt CNAME Target Blocked
-        Policy-->>Engine: false
-        Engine-->>Client: HTTP 200 OK (Synthesized Blocked Response + EDE)
+    Engine->>Policy: Inspect Answer CNAME/DNAME targets & private IPs (if block_private_rebinding)
+    alt CNAME Target Blocked or DNS Rebinding Detected
+        Policy-->>Engine: Blocked
+        Engine-->>Client: HTTP 200 OK (Synthesized Blocked Response + EDE 15/17/18)
     end
 
     alt Cacheable Response (ECS scope == 0)
@@ -469,14 +507,14 @@ stateDiagram-v2
 | [`src/main.rs`](../src/main.rs) | Binary entrypoint (`feature = "cli"`), `MiMalloc` global allocator registration, OS signal handling (`SIGTERM` / `Ctrl-C`). | `main` |
 | [`src/cli.rs`](../src/cli.rs) | CLI flag & `DOH_*` environment parser, boolean/empty-env sanitizer, `sdns://` DNS Stamp generator, `--print-config`, and native `--healthcheck` client, plus zero-dependency JSON/text structured `tracing` subscriber. | `CliArgs`, `run_from_env`, `build_config_from_args`, `execute_healthcheck` |
 | [`src/http/mod.rs`](../src/http/mod.rs) | HTTP request router separating public DoH/ODoH traffic from optional isolated `--admin-listen-address` traffic, plus OWASP security header injection. | `route_public_request`, `route_admin_request`, `finalize_common_headers` |
-| [`src/http/handler.rs`](../src/http/handler.rs) | Core `DohEngine` request pipeline: content negotiation, URI/body size limits, rate-limit check, policy check, cache lookup/insertion, upstream dispatch, and RFC 8484/9111 `Cache-Control` synthesis. | `DohEngine`, `RequestFlavor`, `handle_doh_request`, `build_cache_control_header` |
-| [`src/dns/wire.rs`](../src/dns/wire.rs) | Zero-unsafe DNS wire-format parser, compression pointer loop detector, EDNS0 `OPT` manipulator, RFC 8467 468-byte padding calculator, RFC 8914 Extended DNS Error (`EDE`) attachment, and synthetic policy responses. | `ParsedQueryMeta`, `validate_and_parse_query`, `finalize_wire_response_for_client`, `attach_ede_to_response`, `build_policy_response` |
+| [`src/http/handler.rs`](../src/http/handler.rs) | Core `DohEngine` request pipeline: content negotiation, URI/body size limits, rate-limit check, policy/hosts/rebinding checks, cache lookup/prefetch/serve-stale, Singleflight upstream dispatch, and RFC 8484/9111 `Cache-Control` synthesis. | `DohEngine`, `RequestFlavor`, `handle_doh_request`, `build_cache_control_header` |
+| [`src/dns/wire.rs`](../src/dns/wire.rs) | Zero-unsafe DNS wire-format parser, compression pointer loop detector, EDNS0 `OPT` manipulator, RFC 8467 468-byte padding calculator, RFC 8914 Extended DNS Error (`EDE`) attachment, and synthetic policy/hosts responses. | `ParsedQueryMeta`, `validate_and_parse_query`, `finalize_wire_response_for_client`, `attach_ede_to_response`, `build_policy_response`, `build_hosts_ip_response`, `build_hosts_ptr_response` |
 | [`src/dns/json.rs`](../src/dns/json.rs) | Google / Cloudflare `application/dns-json` query builder and RFC 3597 wire-to-JSON response serializer (including `Status`, `Question`, `Answer`, `Authority`, `Comment`, and `EDE`). | `JsonDnsQueryParams`, `build_wire_query_from_json_params`, `wire_response_to_json` |
 | [`src/dns/odoh.rs`](../src/dns/odoh.rs) | RFC 9230 Oblivious DoH HPKE key generation, lock-free 2-key rotation grace ring (`[current, previous]`), query opener, and 468-byte padded response sealer. | `OdohKeyManager`, `OdohKeyRing`, `OdohActiveKey`, `OdohResponseSealer` |
 | [`src/dns/ecs.rs`](../src/dns/ecs.rs) | RFC 7871 EDNS Client Subnet option parser/synthesizer and right-to-left `X-Forwarded-For` / `Forwarded` trusted-proxy CIDR verifier. | `IpNet`, `extract_client_ip`, `append_ecs_to_query`, `extract_ecs_scope_from_response` |
-| [`src/cache.rs`](../src/cache.rs) | 16-shard in-memory DNS wire response cache with bounded entry size (`4096B`), dynamic TTL decrementation, TXID/Question rewriting, and per-client EDNS padding normalization. | `DnsCache`, `CacheKey`, `CacheHit`, `MAX_CACHE_ENTRY_BYTES` |
-| [`src/policy/mod.rs`](../src/policy/mod.rs) | Fail-closed domain allowlist/blocklist engine (exact + subdomain wildcard matching) and per-IP token-bucket rate limiter with IPv6 `/64` prefix aggregation. | `DomainPolicy`, `BlockAction`, `IpRateLimiter` |
-| [`src/upstream/mod.rs`](../src/upstream/mod.rs) | Multi-upstream UDP/TCP DNS resolver with CSPRNG TXID randomization, spoofed datagram filtering, 30-second per-upstream circuit breaker, and persistent RFC 7766 TCP connection pooling. | `UpstreamSet`, `resolve_upstream_with_set`, `CIRCUIT_BREAKER_COOLDOWN` |
-| [`src/metrics.rs`](../src/metrics.rs) | Lock-free `AtomicU64` Prometheus / OpenMetrics telemetry registry tracking request flavors, latency histograms (`le="0.001"`..`le="+Inf"`), DNS RCODEs, cache hits/misses, policy blocks, and active connections. | `DohMetrics` |
-| [`src/tls.rs`](../src/tls.rs) | `tokio-rustls` TLS 1.2/1.3 server configuration (`0-RTT` disabled, ALPN `h2` + `http/1.1`), background 60s certificate hot-reload watcher, and leaf-pinned TLS healthcheck connector. | `TlsMinVersion`, `ReloadableTlsAcceptor`, `build_pinned_healthcheck_connector` |
+| [`src/cache.rs`](../src/cache.rs) | 16-shard in-memory DNS wire response cache with bounded entry size (`4096B`), dynamic TTL decrementation, RFC 8767 Serve-Stale retention (`--serve-stale-ttl`), proactive 10% TTL prefetch flagging (`--cache-prefetch`), and per-client EDNS padding normalization. | `DnsCache`, `CacheKey`, `CacheHit`, `MAX_CACHE_ENTRY_BYTES` |
+| [`src/policy/mod.rs`](../src/policy/mod.rs) | Lock-free (`ArcSwap`) hot-reloading domain allowlist/blocklist engine, DNS rebinding protection (`--block-private-rebinding`), local `/etc/hosts` split-horizon resolver (`A`/`AAAA`/`PTR`), and per-IP token-bucket rate limiter with IPv6 `/64` prefix aggregation. | `DomainPolicy`, `BlockAction`, `HostsTable`, `IpRateLimiter` |
+| [`src/upstream/mod.rs`](../src/upstream/mod.rs) | Multi-upstream UDP/TCP/DoT (`:853`) DNS resolver with `failover`, `round-robin`, and `parallel` strategies, Singleflight query coalescing, CSPRNG TXID randomization, spoofed datagram filtering, 30-second circuit breaker, and persistent RFC 7766 TCP & RFC 7858 DoT connection pooling. | `UpstreamSet`, `UpstreamStrategy`, `resolve_upstream_coalesced`, `CIRCUIT_BREAKER_COOLDOWN` |
+| [`src/metrics.rs`](../src/metrics.rs) | Lock-free `AtomicU64` Prometheus / OpenMetrics telemetry registry tracking request flavors, latency histograms (`le="0.001"`..`le="+Inf"`), DNS RCODEs, cache hits/misses/stale/prefetch, Singleflight coalescing, policy/rebinding/hosts hits, and per-upstream UDP/TCP/DoT transport metrics. | `DohMetrics` |
+| [`src/tls.rs`](../src/tls.rs) | `tokio-rustls` TLS 1.2/1.3 server configuration (`0-RTT` disabled, ALPN `h2` + `http/1.1`), background 60s certificate hot-reload watcher, leaf-pinned TLS healthcheck connector, and WebPKI-verified RFC 7858 Upstream DoT client connector. | `TlsMinVersion`, `ReloadableTlsAcceptor`, `build_pinned_healthcheck_connector`, `build_upstream_dot_connector` |
 | [`src/error.rs`](../src/error.rs) | Unified strongly-typed error hierarchy mapped deterministically to HTTP status codes (`400`, `401`, `405`, `406`, `413`, `414`, `415`, `502`, `504`). | `DohError` |

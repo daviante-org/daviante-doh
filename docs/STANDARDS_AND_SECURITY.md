@@ -2,7 +2,7 @@
 
 <div align="center">
 
-**[Project Home](../README.md)** • **[Architecture & UML](ARCHITECTURE.md)** • **[Global Standards & Security](STANDARDS_AND_SECURITY.md)** • **[Usage Guide & Examples](USAGE_GUIDE.md)** • **[Deployment Guide](DEPLOYMENT.md)** • **[Helm Chart](../charts/daviante-doh/README.md)**
+**[Project Home](../README.md)** • **[Architecture & UML](ARCHITECTURE.md)** • **[Global Standards & Security](STANDARDS_AND_SECURITY.md)** • **[Usage Guide & Examples](USAGE_GUIDE.md)** • **[OpenAPI 3.1 Spec](openapi.yaml)** • **[Deployment Guide](DEPLOYMENT.md)** • **[Helm Chart](../charts/daviante-doh/README.md)**
 
 </div>
 
@@ -40,12 +40,13 @@ flowchart TD
     end
 
     subgraph OptIn["Opt-In Enterprise Controls (OFF by Default — 100% Configurable)"]
-        O1["In-Memory 16-Shard DNS Cache<br/>(--cache-size / DOH_CACHE_SIZE)"]
-        O2["Protective DNS Domain Allow/Blocklist<br/>(--allowlist-file / --blocklist-file)"]
+        O1["In-Memory 16-Shard DNS Cache + RFC 8767 Serve-Stale & 10% Prefetch<br/>(--cache-size / --serve-stale-ttl / --cache-prefetch)"]
+        O2["Hot-Reloading Domain Policy, DNS Rebinding Guard & Split-Horizon Hosts<br/>(--allowlist-file / --blocklist-file / --block-private-rebinding / --hosts-file)"]
         O3["Per-IP Token-Bucket Rate Limiter & Conn Cap<br/>(--rate-limit-rps / --max-conns-per-ip)"]
         O4["RFC 7871 EDNS Client Subnet Injection<br/>(--enable-ecs + --trusted-proxies)"]
         O5["RFC 8482 QTYPE=ANY Refusal<br/>(--disable-any / DOH_DISABLE_ANY)"]
         O6["Prometheus /metrics & Isolated Admin Port<br/>(--enable-metrics / --admin-listen-address)"]
+        O7["RFC 7858 Upstream DNS-over-TLS (:853) & Load-Balancing Strategies<br/>(--upstream-dot-sni / --upstream-strategy)"]
     end
 ```
 
@@ -63,11 +64,13 @@ flowchart TD
 | **IETF RFC 7239** | `Forwarded` HTTP Extension (`for=` header parsing) | **Mandatory (with `--trusted-proxies`)** | [`src/dns/ecs.rs`](../src/dns/ecs.rs) |
 | **IETF RFC 7766** | DNS Transport over TCP — Implementation Requirements (§6.2.1 Pool) | **Mandatory (Always ON)** | [`src/upstream/mod.rs`](../src/upstream/mod.rs) |
 | **IETF RFC 7830** | The EDNS(0) Padding Option (Option Code `12`) | **Mandatory (Always ON)** | [`src/dns/wire.rs`](../src/dns/wire.rs) |
+| **IETF RFC 7858** | Specification for DNS over Transport Layer Security (`DoT` `:853`) | **Configurable (`--upstream-dot-sni`)** | [`src/upstream/mod.rs`](../src/upstream/mod.rs), [`src/tls.rs`](../src/tls.rs) |
 | **IETF RFC 7871** | Client Subnet in DNS Queries (`ECS`, Option Code `8`) | **Configurable (`--enable-ecs`)** | [`src/dns/ecs.rs`](../src/dns/ecs.rs) |
 | **IETF RFC 8446 §8** | TLS 1.3 Anti-Replay (`max_early_data_size = 0`, 0-RTT Disabled) | **Mandatory (Always ON)** | [`src/tls.rs`](../src/tls.rs) |
 | **IETF RFC 8467** | Padding Policies for Extension Mechanisms for DNS (`468`-Byte Block) | **Mandatory (Always ON)** | [`src/dns/wire.rs`](../src/dns/wire.rs) |
 | **IETF RFC 8482** | Providing Minimal-Sized Responses to DNS Queries That Have `QTYPE=ANY` | **Configurable (`--disable-any`)** | [`src/http/handler.rs`](../src/http/handler.rs) |
 | **IETF RFC 8484** | DNS Queries over HTTPS (DoH) | **Mandatory (Always ON)** | [`src/http/handler.rs`](../src/http/handler.rs) |
+| **IETF RFC 8767** | Serving Stale Data to Improve DNS Resiliency (`EDE 3 Stale Answer`) | **Configurable (`--serve-stale-ttl`)** | [`src/cache.rs`](../src/cache.rs), [`src/http/handler.rs`](../src/http/handler.rs) |
 | **IETF RFC 8914** | Extended DNS Errors (`EDE`, Option Code `15`) | **Mandatory (Always ON)** | [`src/dns/wire.rs`](../src/dns/wire.rs) |
 | **IETF RFC 8932** | Recommendations for DNS Privacy Service Operators | **Mandatory (Always ON)** | [`src/lib.rs`](../src/lib.rs), [`src/cli.rs`](../src/cli.rs) |
 | **IETF RFC 9110 / 9111** | HTTP Semantics & HTTP Caching | **Mandatory (Always ON)** | [`src/http/handler.rs`](../src/http/handler.rs) |
@@ -140,21 +143,24 @@ flowchart TD
 
 | EDE Info Code | Constant Name | Trigger Condition | DNS RCODE Returned |
 | :---: | :--- | :--- | :--- |
+| **`3`** | `Stale Answer` | Expired cached response served during upstream outage per **RFC 8767** (`--serve-stale-ttl > 0`, wire `TTL=30`) | `NOERROR (0)` |
 | **`15`** | `Blocked` | Domain or CNAME target blocked by policy with `--block-action nxdomain` | `NXDOMAIN (3)` |
-| **`17`** | `Filtered` | Domain or CNAME target blocked by policy with `--block-action zero-ip` (`0.0.0.0` / `::`) | `NOERROR (0)` |
+| **`17`** | `Filtered` | Domain/CNAME blocked with `--block-action zero-ip` OR public domain resolving to private/loopback IP when `--block-private-rebinding` is enabled | `NOERROR (0)` / `REFUSED (5)` |
 | **`18`** | `Prohibited` | Domain or CNAME target blocked by policy with `--block-action refused` | `REFUSED (5)` |
 | **`21`** | `Not Supported` | `QTYPE=ANY (255)` query refused when `--disable-any` (`DOH_DISABLE_ANY=true`) is enabled per **RFC 8482** | `NOTIMP (4)` |
 | **`22`** | `No Reachable Authority` | All configured upstream resolvers timed out | `SERVFAIL (2)` |
-| **`23`** | `Network Error` | Upstream UDP/TCP socket I/O error across all configured upstreams | `SERVFAIL (2)` |
+| **`23`** | `Network Error` | Upstream UDP/TCP/DoT socket I/O error across all configured upstreams | `SERVFAIL (2)` |
 
 ---
 
-## 9. IETF RFC 5452 & RFC 7766 — Upstream Forgery Resilience & DNS-over-TCP
+## 9. IETF RFC 5452, RFC 7766 & RFC 7858 — Upstream Forgery Resilience, DNS-over-TCP & DNS-over-TLS
 
-- **CSPRNG Transaction ID Randomization (RFC 5452 §9.1)**: Every outbound UDP query rewrites the 16-bit DNS `TXID` using a thread-local cryptographically secure random number generator (`rand::rng()`), then restores the client's original `TXID` after verification.
+- **CSPRNG Transaction ID Randomization (RFC 5452 §9.1)**: Every outbound UDP/TCP/DoT query rewrites the 16-bit DNS `TXID` using a thread-local cryptographically secure random number generator (`rand::rng()`), then restores the client's original `TXID` after verification.
 - **Spoofed Datagram Rejection Loop**: The UDP receive loop verifies that `packet.len() >= 12`, `TXID == expected_txid`, `QR == 1`, and the response Question section matches the query Question section (case-insensitive). Mismatched datagrams are logged and discarded without terminating the query window.
 - **`0x20` Mixed-Case Preservation**: The client's original Question casing (e.g., `eXaMpLe.CoM`) is preserved in the final response.
 - **Persistent TCP Connection Pool (RFC 7766 §6.2.1)**: When a UDP response sets `TC=1` (Truncated), `daviante-doh` retries over a pooled TCP `:53` connection (up to `8` idle connections per upstream endpoint, `65,535`-byte buffer).
+- **Encrypted Upstream DNS-over-TLS (RFC 7858 `:853`)**: When `--upstream-dot-sni <HOSTNAME>` (`DOH_UPSTREAM_DOT_SNI`) is set, upstream queries are encrypted over TLS 1.2/1.3 using `tokio-rustls` + Mozilla WebPKI root certificates (`webpki-roots`) with persistent connection pooling (`MAX_POOLED_DOT_CONNS_PER_UPSTREAM = 8`) and automatic stale-socket reconnect.
+- **Multi-Strategy Load Balancing & Singleflight Coalescing**: Supports `failover` (sequential priority with 30s circuit breaker), `round-robin`, and `parallel` (fastest-wins `JoinSet` race across healthy upstreams), while deduplicating concurrent identical cache-miss queries via Singleflight coalescing (`daviante_doh_coalesced_queries_total`).
 
 ---
 

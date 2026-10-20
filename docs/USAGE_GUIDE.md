@@ -2,7 +2,7 @@
 
 <div align="center">
 
-**[Project Home](../README.md)** • **[Architecture & UML](ARCHITECTURE.md)** • **[Global Standards & Security](STANDARDS_AND_SECURITY.md)** • **[Usage Guide & Examples](USAGE_GUIDE.md)** • **[Deployment Guide](DEPLOYMENT.md)** • **[Helm Chart](../charts/daviante-doh/README.md)**
+**[Project Home](../README.md)** • **[Architecture & UML](ARCHITECTURE.md)** • **[Global Standards & Security](STANDARDS_AND_SECURITY.md)** • **[Usage Guide & Examples](USAGE_GUIDE.md)** • **[OpenAPI 3.1 Spec](openapi.yaml)** • **[Deployment Guide](DEPLOYMENT.md)** • **[Helm Chart](../charts/daviante-doh/README.md)**
 
 </div>
 
@@ -19,7 +19,9 @@
    - [2.5 Python (`httpx` + `dnspython`) Client Example](#25-python-httpx--dnspython-client-example)
 3. [Enterprise Configuration Recipes](#3-enterprise-configuration-recipes)
    - [3.1 Protective DNS Domain Allowlist & Blocklist](#31-protective-dns-domain-allowlist--blocklist)
-   - [3.2 High-Performance 16-Shard In-Memory DNS Cache](#32-high-performance-16-shard-in-memory-dns-cache)
+   - [3.2 High-Performance 16-Shard In-Memory DNS Cache, RFC 8767 Serve-Stale & Prefetching](#32-high-performance-16-shard-in-memory-dns-cache-rfc-8767-serve-stale--prefetching)
+   - [3.2b Multi-Strategy Upstream Load Balancing & Encrypted Upstream DoT (`RFC 7858`)](#32b-multi-strategy-upstream-load-balancing--encrypted-upstream-dot-rfc-7858)
+   - [3.2c DNS Rebinding Protection, Split-Horizon Hosts & Lock-Free Policy Hot-Reload](#32c-dns-rebinding-protection-split-horizon-hosts--lock-free-policy-hot-reload)
    - [3.3 Per-IP Token-Bucket Rate Limiting & Connection Caps](#33-per-ip-token-bucket-rate-limiting--connection-caps)
    - [3.4 Trusted Reverse Proxies & RFC 7871 EDNS Client Subnet (ECS)](#34-trusted-reverse-proxies--rfc-7871-edns-client-subnet-ecs)
    - [3.5 Isolated Admin Listener & Prometheus / OpenMetrics Telemetry](#35-isolated-admin-listener--prometheus--openmetrics-telemetry)
@@ -251,17 +253,39 @@ daviante-doh \
   --block-action nxdomain
 ```
 
-### 3.2 High-Performance 16-Shard In-Memory DNS Cache
+### 3.2 High-Performance 16-Shard In-Memory DNS Cache, RFC 8767 Serve-Stale & Prefetching
 
-Enable the 16-shard in-memory cache (`--cache-size`) and optional **RFC 5861** HTTP cache directives:
+Enable the 16-shard in-memory cache (`--cache-size`), **RFC 8767 Serve-Stale** (`--serve-stale-ttl`), proactive 10% TTL **Cache Prefetching** (`--cache-prefetch`), and optional **RFC 5861** HTTP cache directives:
 ```bash
 daviante-doh \
   --cache-size 65536 \
+  --serve-stale-ttl 86400 \
+  --cache-prefetch \
   --min-ttl 0 \
   --max-ttl 86400 \
   --err-ttl 5 \
-  --stale-while-revalidate-secs 60 \
-  --stale-if-error-secs 86400
+  --stale-while-revalidate 60 \
+  --stale-if-error 86400
+```
+
+### 3.2b Multi-Strategy Upstream Load Balancing & Encrypted Upstream DoT (`RFC 7858`)
+
+Choose between `failover` (default sequential priority), `round-robin`, or `parallel` (fastest-wins concurrent query race), and optionally encrypt upstream queries over **DNS-over-TLS (`DoT`, RFC 7858 `:853`)**:
+```bash
+daviante-doh \
+  --server-address 9.9.9.9:853,1.1.1.1:853 \
+  --upstream-strategy parallel \
+  --upstream-dot-sni dns.quad9.net
+```
+
+### 3.2c DNS Rebinding Protection, Split-Horizon Hosts & Lock-Free Policy Hot-Reload
+
+Block upstream responses that resolve public domains to RFC 1918 / loopback / link-local IPs (`--block-private-rebinding`) while serving local split-horizon `A`, `AAAA`, and `PTR` records from `--hosts-file` (automatically hot-reloaded on file modification alongside `--allowlist-file` and `--blocklist-file`):
+```bash
+daviante-doh \
+  --hosts-file /etc/daviante-doh/policy/hosts.txt \
+  --blocklist-file /etc/daviante-doh/policy/blocklist.txt \
+  --block-private-rebinding
 ```
 
 ### 3.3 Per-IP Token-Bucket Rate Limiting & Connection Caps
@@ -303,16 +327,22 @@ daviante-doh \
 
 | Metric Name | Type | Labels | Description |
 | :--- | :---: | :---: | :--- |
-| `daviante_doh_requests_total` | `counter` | — | Total HTTP requests processed by the DoH engine |
-| `daviante_doh_requests_by_flavor_total` | `counter` | `flavor="doh_get" \| "doh_post" \| "odoh" \| "json"` | Requests broken down by protocol flavor |
-| `daviante_doh_responses_by_rcode_total` | `counter` | `rcode="NOERROR" \| "NXDOMAIN" \| "SERVFAIL" \| "REFUSED" \| "FORMERR" \| "OTHER"` | DNS responses broken down by DNS RCODE |
+| `daviante_doh_requests_total` | `counter` | `flavor="wire" \| "json" \| "odoh"` | Total DoH requests received by protocol flavor |
+| `daviante_doh_responses_total` | `counter` | `status="2xx" \| "4xx" \| "5xx"` | Total HTTP responses sent by HTTP status class |
+| `daviante_doh_responses_by_rcode_total` | `counter` | `rcode="NOERROR" \| "FORMERR" \| "SERVFAIL" \| "NXDOMAIN" \| "NOTIMP" \| "REFUSED" \| "OTHER"` | Total DNS responses sent by DNS RCODE |
 | `daviante_doh_cache_hits_total` | `counter` | — | Total queries served directly from the 16-shard `DnsCache` |
 | `daviante_doh_cache_misses_total` | `counter` | — | Total cache misses forwarded to upstream resolvers |
+| `daviante_doh_cache_stale_hits_total` | `counter` | — | Total expired cache entries served during upstream outages per RFC 8767 (`EDE 3`) |
+| `daviante_doh_cache_prefetch_total` | `counter` | — | Total proactive background cache refreshes triggered in the final 10% of TTL |
+| `daviante_doh_coalesced_queries_total` | `counter` | — | Total concurrent cache-miss queries deduplicated via Singleflight coalescing |
 | `daviante_doh_policy_blocked_total` | `counter` | — | Total queries or CNAME chains blocked by `DomainPolicy` |
+| `daviante_doh_rebinding_blocked_total` | `counter` | — | Total upstream responses blocked by DNS rebinding protection (`EDE 17`) |
+| `daviante_doh_hosts_hits_total` | `counter` | — | Total queries answered locally from `--hosts-file` (`A`, `AAAA`, `PTR`) |
 | `daviante_doh_rate_limited_total` | `counter` | — | Total requests rejected with `HTTP 429` by `IpRateLimiter` |
-| `daviante_doh_upstream_failures_total` | `counter` | — | Total upstream UDP/TCP timeouts or socket errors |
+| `daviante_doh_upstream_queries_total` | `counter` | `transport="udp" \| "tcp" \| "dot"`, `upstream`, `result="ok" \| "error" \| "timeout"` | Total queries sent to upstream DNS resolvers by transport and target |
+| `daviante_doh_upstream_failures_total` | `counter` | — | Total upstream UDP/TCP/DoT timeouts or socket errors |
 | `daviante_doh_connections_active` | `gauge` | — | Currently active client TCP/TLS connections |
-| `daviante_doh_request_duration_seconds` | `histogram` | `flavor="doh_get" \| "doh_post" \| "odoh" \| "json"`, `le="0.001".."10.0"` | End-to-end request latency histogram (11 buckets) |
+| `daviante_doh_request_duration_seconds` | `histogram` | `flavor="wire" \| "json" \| "odoh"`, `le="0.001".."10.0" \| "+Inf"` | End-to-end request latency histogram (12 buckets + `+Inf`) |
 
 ### 3.6 Built-In TLS 1.2 / 1.3 with Zero-Downtime Certificate Hot-Reload
 

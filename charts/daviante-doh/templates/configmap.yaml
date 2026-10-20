@@ -1,6 +1,7 @@
 {{- $hasInlineAllow := gt (len .Values.policy.allowlist) 0 -}}
 {{- $hasInlineBlock := gt (len .Values.policy.blocklist) 0 -}}
-{{- $hasPolicyCm := or (ne .Values.policy.existingConfigMap "") $hasInlineAllow $hasInlineBlock -}}
+{{- $hasInlineHosts := gt (len .Values.policy.hosts) 0 -}}
+{{- $hasPolicyCm := or (ne .Values.policy.existingConfigMap "") $hasInlineAllow $hasInlineBlock $hasInlineHosts -}}
 {{- $allowPath := .Values.config.allowlistFile -}}
 {{- if and (eq $allowPath "") (or $hasInlineAllow (ne .Values.policy.existingConfigMap "")) -}}
 {{- $allowPath = "/etc/daviante-doh/policy/allowlist.txt" -}}
@@ -8,6 +9,10 @@
 {{- $blockPath := .Values.config.blocklistFile -}}
 {{- if and (eq $blockPath "") (or $hasInlineBlock (ne .Values.policy.existingConfigMap "")) -}}
 {{- $blockPath = "/etc/daviante-doh/policy/blocklist.txt" -}}
+{{- end -}}
+{{- $hostsPath := .Values.config.hostsFile -}}
+{{- if and (eq $hostsPath "") $hasInlineHosts -}}
+{{- $hostsPath = "/etc/daviante-doh/policy/hosts.txt" -}}
 {{- end -}}
 apiVersion: v1
 kind: ConfigMap
@@ -39,6 +44,11 @@ data:
   DOH_STALE_IF_ERROR: {{ .Values.config.staleIfErrorSecs | quote }}
   DOH_STALE_WHILE_REVALIDATE: {{ .Values.config.staleWhileRevalidateSecs | quote }}
   DOH_CACHE_SIZE: {{ .Values.config.cacheSize | quote }}
+  DOH_SERVE_STALE_TTL: {{ .Values.config.serveStaleTtl | quote }}
+  DOH_CACHE_PREFETCH: {{ .Values.config.cachePrefetch | quote }}
+  DOH_DISABLE_COALESCING: {{ .Values.config.disableCoalescing | quote }}
+  DOH_UPSTREAM_STRATEGY: {{ .Values.config.upstreamStrategy | quote }}
+  DOH_UPSTREAM_DOT_SNI: {{ .Values.config.upstreamDotSni | quote }}
   DOH_DISABLE_KEEPALIVE: {{ .Values.config.disableKeepalive | quote }}
   DOH_DISABLE_POST: {{ .Values.config.disablePost | quote }}
   DOH_ALLOW_ODOH_POST: {{ .Values.config.allowOdohPost | quote }}
@@ -50,7 +60,9 @@ data:
   DOH_ODOH_ROTATION_SECS: {{ .Values.config.odohRotationSecs | quote }}
   DOH_ALLOWLIST_FILE: {{ $allowPath | quote }}
   DOH_BLOCKLIST_FILE: {{ $blockPath | quote }}
+  DOH_HOSTS_FILE: {{ $hostsPath | quote }}
   DOH_BLOCK_ACTION: {{ .Values.config.blockAction | quote }}
+  DOH_BLOCK_PRIVATE_REBINDING: {{ .Values.config.blockPrivateRebinding | quote }}
   DOH_RATE_LIMIT_RPS: {{ .Values.config.rateLimitRps | quote }}
   DOH_RATE_LIMIT_BURST: {{ .Values.config.rateLimitBurst | quote }}
   DOH_RATE_LIMIT_V6_PREFIX: {{ .Values.config.rateLimitV6Prefix | quote }}

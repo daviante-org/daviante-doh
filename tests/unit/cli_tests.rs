@@ -107,6 +107,17 @@ fn full_cli_flags_summary_and_stamps() {
             "/tmp/allow.txt",
             "--blocklist-file",
             "/tmp/block.txt",
+            "--hosts-file",
+            "/tmp/hosts.txt",
+            "--block-private-rebinding",
+            "--serve-stale-ttl",
+            "3600",
+            "--cache-prefetch",
+            "--disable-coalescing",
+            "--upstream-strategy",
+            "parallel",
+            "--upstream-dot-sni",
+            "dns.quad9.net",
             "--tls-cert-path",
             "/tmp/cert.pem",
             "--tls-cert-key-path",
@@ -136,6 +147,13 @@ fn full_cli_flags_summary_and_stamps() {
     assert!(summary.contains("--disable-any"));
     assert!(summary.contains("--enable-ecs"));
     assert!(summary.contains("--log-queries"));
+    assert!(summary.contains("--hosts-file /tmp/hosts.txt"));
+    assert!(summary.contains("--block-private-rebinding"));
+    assert!(summary.contains("--serve-stale-ttl 3600"));
+    assert!(summary.contains("--cache-prefetch"));
+    assert!(summary.contains("--disable-coalescing"));
+    assert!(summary.contains("--upstream-strategy parallel"));
+    assert!(summary.contains("--upstream-dot-sni dns.quad9.net"));
 
     // Verify empty upstream list error and remaining log_level variants
     let empty_u = build_cli()

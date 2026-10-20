@@ -6,6 +6,26 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ---
 
+## [Unreleased]
+
+### Added
+- **RFC 8767 Serve-Stale & Proactive 10% TTL Cache Prefetching (`src/cache.rs`, `src/http/handler.rs`)**:
+  - Added `--serve-stale-ttl <SECS>` (`DOH_SERVE_STALE_TTL`) to retain expired DNS cache entries beyond their wire TTL and serve them with `TTL=30` and **RFC 8914 `EDE 3 (Stale Answer)`** when all upstream resolvers fail (`daviante_doh_cache_stale_hits_total`).
+  - Added `--cache-prefetch` (`DOH_CACHE_PREFETCH`) to trigger non-blocking background cache refreshes when a hot entry is queried within the final 10% of its original TTL (`daviante_doh_cache_prefetch_total`).
+- **Singleflight In-Flight Query Coalescing (`src/upstream/mod.rs`)**:
+  - Added automatic Singleflight deduplication of identical concurrent cache-miss queries (`qname`, `qtype`, `qclass`, `do`, `cd`, `ecs_subnet`) so only one upstream DNS packet is sent per stampede while waiters receive TXID/0x20-rewritten clones (`daviante_doh_coalesced_queries_total`). Configurable via `--disable-coalescing` (`DOH_DISABLE_COALESCING`).
+- **Multi-Strategy Upstream Load Balancing & RFC 7858 Upstream DoT (`src/upstream/mod.rs`, `src/tls.rs`)**:
+  - Added `--upstream-strategy <failover|round-robin|parallel>` (`DOH_UPSTREAM_STRATEGY`) supporting sequential failover, round-robin distribution, and fastest-wins concurrent `JoinSet` racing across healthy upstreams.
+  - Added `--upstream-dot-sni <HOSTNAME>` (`DOH_UPSTREAM_DOT_SNI`) for encrypted **RFC 7858 DNS-over-TLS (`:853`)** upstream queries with Mozilla WebPKI certificate verification (`webpki-roots`) and persistent TLS connection pooling (`daviante_doh_upstream_queries_total{transport="dot"}`).
+- **DNS Rebinding Protection, Split-Horizon Hosts & Lock-Free Policy Hot-Reload (`src/policy/mod.rs`)**:
+  - Added `--block-private-rebinding` (`DOH_BLOCK_PRIVATE_REBINDING`) to inspect upstream `A`/`AAAA` answers and block public domains resolving to RFC 1918 private, loopback, link-local, CGNAT, or ULA addresses with **RFC 8914 `EDE 17 (Filtered)`** (`daviante_doh_rebinding_blocked_total`).
+  - Added `--hosts-file <PATH>` (`DOH_HOSTS_FILE`) and Helm `policy.hosts` ConfigMap support to serve local split-horizon `A`, `AAAA`, and reverse `PTR` (`in-addr.arpa` / `ip6.arpa`) records (`daviante_doh_hosts_hits_total`).
+  - Wrapped `DomainPolicy` in `ArcSwap<DomainPolicySnapshot>` with a 60-second background file `mtime` watcher that atomically hot-reloads `--allowlist-file`, `--blocklist-file`, and `--hosts-file` with zero lock contention and fail-safe retention of the last-known-good snapshot.
+- **OpenAPI 3.1.0 Specification (`docs/openapi.yaml`)**:
+  - Added a complete OpenAPI 3.1.0 specification covering `/dns-query` (RFC 8484 Wireformat GET/POST, RFC 9230 ODoH POST, JSON DoH GET), `/.well-known/odohconfigs`, `/metrics`, and `/healthz` (`/livez`, `/readyz`).
+
+---
+
 ## [0.1.0] - 2026-10-18
 
 ### Summary

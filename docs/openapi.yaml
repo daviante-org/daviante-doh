@@ -1,0 +1,415 @@
+openapi: 3.1.0
+info:
+  title: daviante-doh DNS-over-HTTPS, Oblivious DoH, & JSON DoH API
+  version: 0.2.0
+  summary: >-
+    Standards-compliant DNS-over-HTTPS (RFC 8484), Oblivious DoH (RFC 9230),
+    and JSON DoH (application/dns-json) server by Daviante.
+  description: |
+    `daviante-doh` is an ultra-lightweight, memory-safe (`#![forbid(unsafe_code)]`) DNS-over-HTTPS (DoH),
+    Oblivious DoH (ODoH), and JSON DoH server engineered by [Daviante](https://daviante.org).
+
+    ### Supported Protocols on `/dns-query`
+    1. **RFC 8484 Wireformat DoH (`application/dns-message`)** — `GET ?dns=<base64url>` and `POST` binary DNS wire packets.
+    2. **Google / Cloudflare JSON DoH (`application/dns-json`)** — `GET ?name=<domain>&type=<rrtype>&do=<bool>&cd=<bool>`.
+    3. **RFC 9230 Oblivious DoH (`application/oblivious-dns-message`)** — `POST` HPKE-encrypted queries (`KEM: X25519HkdfSha256`, `KDF: HkdfSha256`, `AEAD: Aes128Gcm`).
+  contact:
+    name: Daviante Engineering
+    url: https://daviante.org
+  license:
+    name: Apache-2.0
+    identifier: Apache-2.0
+    url: https://www.apache.org/licenses/LICENSE-2.0
+
+servers:
+  - url: http://localhost:3000
+    description: Local development / container HTTP listener
+  - url: https://doh.example.com
+    description: Production HTTPS listener (HTTP/2 + HTTP/1.1)
+
+tags:
+  - name: DNS Resolution
+    description: RFC 8484 Wireformat DoH, JSON DoH, and RFC 9230 Oblivious DoH endpoints
+  - name: Oblivious DoH Discovery
+    description: RFC 9230 HPKE Key Configuration discovery endpoint
+  - name: Operations & Observability
+    description: Kubernetes / OpenShift liveness, readiness, and Prometheus metrics endpoints
+
+paths:
+  /dns-query:
+    get:
+      tags:
+        - DNS Resolution
+      operationId: queryDnsGet
+      summary: Resolve DNS query via HTTP GET (RFC 8484 Wireformat or JSON DoH)
+      description: |
+        Resolves a DNS query over HTTP `GET` (or `HEAD`).
+        - **JSON DoH (`Accept: application/dns-json` or `?name=...`)**: Supply `name` and optional `type`, `do`, `cd`, and `edns_client_subnet` parameters.
+        - **RFC 8484 Wireformat DoH (`Accept: application/dns-message` or `?dns=...`)**: Supply base64url-unpadded DNS wire query in `dns`.
+      parameters:
+        - name: name
+          in: query
+          required: false
+          description: Domain name to resolve (required for `application/dns-json` queries, e.g. `example.com`).
+          schema:
+            type: string
+            examples:
+              - example.com
+        - name: type
+          in: query
+          required: false
+          description: DNS Resource Record type by mnemonic or number (`A`, `AAAA`, `MX`, `TXT`, `SRV`, `PTR`, `CAA`, `HTTPS`, `SVCB`, `DNSKEY`, `DS`, `1`..`65535`).
+          schema:
+            type: string
+            default: A
+            examples:
+              - A
+              - AAAA
+              - TXT
+              - HTTPS
+        - name: cd
+          in: query
+          required: false
+          description: DNSSEC Checking Disabled (`CD`) flag (`true` / `1` or `false` / `0`).
+          schema:
+            type: boolean
+            default: false
+        - name: do
+          in: query
+          required: false
+          description: DNSSEC OK (`DO`) EDNS0 bit (`true` / `1` or `false` / `0`).
+          schema:
+            type: boolean
+            default: false
+        - name: edns_client_subnet
+          in: query
+          required: false
+          description: Optional RFC 7871 EDNS Client Subnet CIDR (e.g. `198.51.100.0/24` or `2001:db8::/56`).
+          schema:
+            type: string
+        - name: ct
+          in: query
+          required: false
+          description: Explicit response content-type override (`application/dns-json` or `application/dns-message`).
+          schema:
+            type: string
+            enum:
+              - application/dns-json
+              - application/dns-message
+        - name: dns
+          in: query
+          required: false
+          description: Base64url-encoded (unpadded) binary DNS wire query per RFC 8484 §4.1.
+          schema:
+            type: string
+            examples:
+              - AAABAAABAAAAAAAAB2V4YW1wbGUDY29tAAABAAE
+      responses:
+        "200":
+          description: DNS response returned (including `NOERROR`, `NXDOMAIN`, `REFUSED`, `SERVFAIL`, or RFC 8767 Stale Answer).
+          headers:
+            Cache-Control:
+              description: HTTP freshness directive derived from minimum Answer RR TTL per RFC 8484 §5.1.
+              schema:
+                type: string
+                examples:
+                  - max-age=300, stale-if-error=86400, stale-while-revalidate=60
+            Vary:
+              schema:
+                type: string
+                examples:
+                  - Accept, Content-Type
+          content:
+            application/dns-json:
+              schema:
+                $ref: "#/components/schemas/DnsJsonResponse"
+            application/dns-message:
+              schema:
+                type: string
+                format: binary
+                description: Binary DNS wire-format response message (padded to 468-byte multiple per RFC 8467 if client sent EDNS0).
+        "400":
+          description: Malformed DNS packet, missing query parameters, or invalid record type.
+          content:
+            application/dns-json:
+              schema:
+                $ref: "#/components/schemas/DnsJsonError"
+        "405":
+          description: Method not allowed (e.g., Oblivious DoH requested over `GET` instead of `POST`).
+        "406":
+          description: Unsupported `Accept` media type.
+        "414":
+          description: `dns` base64url query parameter exceeds maximum permitted DNS query size.
+        "429":
+          description: Client IP / IPv6 `/64` subnet exceeded token-bucket rate limit (`Retry-After: 1`).
+    post:
+      tags:
+        - DNS Resolution
+      operationId: queryDnsPost
+      summary: Resolve DNS query via HTTP POST (RFC 8484 Wireformat or RFC 9230 Oblivious DoH)
+      description: |
+        Accepts binary DNS wire queries (`Content-Type: application/dns-message`) or
+        HPKE-encrypted Oblivious DoH queries (`Content-Type: application/oblivious-dns-message`).
+      requestBody:
+        required: true
+        content:
+          application/dns-message:
+            schema:
+              type: string
+              format: binary
+              description: Raw RFC 1035 / RFC 8484 DNS wire query message (12..=512 bytes).
+          application/oblivious-dns-message:
+            schema:
+              type: string
+              format: binary
+              description: RFC 9230 `ObliviousDoHMessage` (type `0x01` encrypted query).
+      responses:
+        "200":
+          description: Binary DNS wire response or HPKE-encrypted Oblivious DoH response.
+          content:
+            application/dns-message:
+              schema:
+                type: string
+                format: binary
+            application/oblivious-dns-message:
+              schema:
+                type: string
+                format: binary
+        "400":
+          description: Malformed DNS wire query or invalid ODoH HPKE ciphertext.
+        "401":
+          description: Oblivious DoH `key_id` does not match active or previous HPKE key configuration (RFC 9230 §4.3).
+        "413":
+          description: Request body exceeds `MAX_DNS_QUERY_LEN` (512 bytes).
+        "415":
+          description: Missing or unsupported `Content-Type` header.
+        "429":
+          description: Rate limit exceeded.
+    options:
+      tags:
+        - DNS Resolution
+      operationId: corsPreflightDnsQuery
+      summary: W3C CORS preflight response for browser DoH clients
+      responses:
+        "204":
+          description: CORS preflight permitted.
+          headers:
+            Access-Control-Allow-Origin:
+              schema:
+                type: string
+            Access-Control-Allow-Methods:
+              schema:
+                type: string
+                examples:
+                  - GET, HEAD, POST, OPTIONS
+            Access-Control-Allow-Headers:
+              schema:
+                type: string
+                examples:
+                  - Content-Type, Accept
+
+  /.well-known/odohconfigs:
+    get:
+      tags:
+        - Oblivious DoH Discovery
+      operationId: getOdohConfigs
+      summary: Retrieve active RFC 9230 Oblivious DoH HPKE Key Configurations
+      description: |
+        Returns the serialized `ObliviousDoHConfigs` binary structure advertising the server's active
+        `X25519HkdfSha256` / `HkdfSha256` / `Aes128Gcm` public key configuration.
+      responses:
+        "200":
+          description: Serialized `ObliviousDoHConfigs` payload (`application/octet-stream`).
+          content:
+            application/octet-stream:
+              schema:
+                type: string
+                format: binary
+
+  /livez:
+    get:
+      tags:
+        - Operations & Observability
+      operationId: getLiveness
+      summary: Kubernetes / OpenShift liveness probe
+      responses:
+        "200":
+          description: Server process is alive.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HealthStatus"
+
+  /readyz:
+    get:
+      tags:
+        - Operations & Observability
+      operationId: getReadiness
+      summary: Kubernetes / OpenShift readiness probe
+      description: |
+        Returns `200 OK` when the server is accepting traffic and at least one upstream DNS resolver
+        has a closed/healthy circuit breaker. Returns `503 Service Unavailable` during graceful
+        shutdown drain or when all upstream circuit breakers are open.
+      responses:
+        "200":
+          description: Ready to serve DNS traffic.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HealthStatus"
+        "503":
+          description: Draining connections or all upstream circuit breakers are open.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HealthStatus"
+
+  /healthz:
+    get:
+      tags:
+        - Operations & Observability
+      operationId: getHealthz
+      summary: Container health check alias
+      responses:
+        "200":
+          description: Healthy.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HealthStatus"
+
+  /metrics:
+    get:
+      tags:
+        - Operations & Observability
+      operationId: getPrometheusMetrics
+      summary: Prometheus / OpenMetrics exposition endpoint (when `--enable-metrics` is enabled)
+      description: |
+        Exposes request counters by protocol flavor (`wire`, `odoh`, `json`), latency histograms,
+        DNS `RCODE` breakdown, cache hit/miss/stale/prefetch counters, Singleflight coalesced query
+        counters, Protective DNS / rebinding / hosts-file counters, and per-upstream transport metrics (`udp`, `tcp`, `dot`).
+      responses:
+        "200":
+          description: Prometheus text exposition format (`0.0.4`).
+          content:
+            text/plain:
+              schema:
+                type: string
+
+components:
+  schemas:
+    DnsJsonResponse:
+      type: object
+      required:
+        - Status
+        - TC
+        - RD
+        - RA
+        - AD
+        - CD
+      properties:
+        Status:
+          type: integer
+          description: Standard DNS RCODE (`0` = `NOERROR`, `2` = `SERVFAIL`, `3` = `NXDOMAIN`, `5` = `REFUSED`).
+          examples:
+            - 0
+        TC:
+          type: boolean
+          description: Truncated response flag.
+        RD:
+          type: boolean
+          description: Recursion Desired flag.
+        RA:
+          type: boolean
+          description: Recursion Available flag.
+        AD:
+          type: boolean
+          description: Authenticated Data (DNSSEC) flag.
+        CD:
+          type: boolean
+          description: Checking Disabled (DNSSEC) flag.
+        Question:
+          type: array
+          items:
+            $ref: "#/components/schemas/DnsJsonQuestion"
+        Answer:
+          type: array
+          items:
+            $ref: "#/components/schemas/DnsJsonRecord"
+        Authority:
+          type: array
+          items:
+            $ref: "#/components/schemas/DnsJsonRecord"
+        Comment:
+          type: string
+          description: Optional RFC 8914 Extended DNS Error (EDE) diagnostic text.
+        edns_client_subnet:
+          type: string
+          description: Echoed RFC 7871 EDNS Client Subnet `ip/source_prefix/scope_prefix`.
+    DnsJsonQuestion:
+      type: object
+      required:
+        - name
+        - type
+      properties:
+        name:
+          type: string
+          examples:
+            - example.com
+        type:
+          type: integer
+          examples:
+            - 1
+    DnsJsonRecord:
+      type: object
+      required:
+        - name
+        - type
+        - TTL
+        - data
+      properties:
+        name:
+          type: string
+          examples:
+            - example.com
+        type:
+          type: integer
+          examples:
+            - 1
+        TTL:
+          type: integer
+          examples:
+            - 300
+        data:
+          type: string
+          examples:
+            - 93.184.216.34
+    DnsJsonError:
+      type: object
+      required:
+        - Status
+        - Comment
+      properties:
+        Status:
+          type: integer
+          examples:
+            - 1
+        Comment:
+          type: string
+          examples:
+            - Invalid DNS record type
+    HealthStatus:
+      type: object
+      required:
+        - status
+        - service
+      properties:
+        status:
+          type: string
+          enum:
+            - ok
+            - ready
+            - not_ready
+        service:
+          type: string
+          const: daviante-doh
