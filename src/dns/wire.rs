@@ -457,6 +457,17 @@ pub fn escape_presentation_label(label_bytes: &[u8], out: &mut String) {
     }
 }
 
+fn parse_rr_rdata_bounds(packet: &[u8], after_name: usize) -> Option<(u16, usize, usize)> {
+    if after_name + 10 > packet.len() {
+        return None;
+    }
+    let rr_type = read_u16_be(packet, after_name).ok()?;
+    let rdlen = read_u16_be(packet, after_name + 8).ok()? as usize;
+    let rdata_start = after_name + 10;
+    let rdata_end = rdata_start + rdlen;
+    (rdata_end <= packet.len()).then_some((rr_type, rdata_start, rdata_end))
+}
+
 /// Extracts all lowercased owner names and CNAME/DNAME target domain names from the Answer section (N-4).
 pub fn extract_answer_domain_names(packet: &[u8]) -> Vec<String> {
     let mut names = Vec::new();
@@ -472,20 +483,10 @@ pub fn extract_answer_domain_names(packet: &[u8]) -> Vec<String> {
         if !clean_owner.is_empty() {
             names.push(clean_owner);
         }
-        if after_name + 10 > packet.len() {
-            break;
-        }
-        let Ok(rr_type) = read_u16_be(packet, after_name) else {
+        let Some((rr_type, rdata_start, rdata_end)) = parse_rr_rdata_bounds(packet, after_name)
+        else {
             break;
         };
-        let Ok(rdlen) = read_u16_be(packet, after_name + 8) else {
-            break;
-        };
-        let rdata_start = after_name + 10;
-        let rdata_end = rdata_start + (rdlen as usize);
-        if rdata_end > packet.len() {
-            break;
-        }
         if matches!(rr_type, RR_TYPE_CNAME | RR_TYPE_DNAME) {
             if let Ok((target, _)) = decode_name(packet, rdata_start) {
                 let clean_target = target.trim_end_matches('.').to_ascii_lowercase();
@@ -510,26 +511,18 @@ pub fn extract_answer_ips(packet: &[u8]) -> Vec<IpAddr> {
         let Ok(after_name) = skip_name(packet, offset) else {
             break;
         };
-        if after_name + 10 > packet.len() {
-            break;
-        }
-        let Ok(rr_type) = read_u16_be(packet, after_name) else {
+        let Some((rr_type, rdata_start, rdata_end)) = parse_rr_rdata_bounds(packet, after_name)
+        else {
             break;
         };
-        let Ok(rdlen) = read_u16_be(packet, after_name + 8) else {
-            break;
-        };
-        let rdata_start = after_name + 10;
-        let rdata_end = rdata_start + (rdlen as usize);
-        if rdata_end > packet.len() {
-            break;
-        }
-        if rr_type == RR_TYPE_A && rdlen == 4 {
-            let b = &packet[rdata_start..rdata_end];
-            ips.push(IpAddr::V4(Ipv4Addr::new(b[0], b[1], b[2], b[3])));
-        } else if rr_type == RR_TYPE_AAAA && rdlen == 16 {
+        let rdata = &packet[rdata_start..rdata_end];
+        if rr_type == RR_TYPE_A && rdata.len() == 4 {
+            ips.push(IpAddr::V4(Ipv4Addr::new(
+                rdata[0], rdata[1], rdata[2], rdata[3],
+            )));
+        } else if rr_type == RR_TYPE_AAAA && rdata.len() == 16 {
             let mut octets = [0u8; 16];
-            octets.copy_from_slice(&packet[rdata_start..rdata_end]);
+            octets.copy_from_slice(rdata);
             ips.push(IpAddr::V6(Ipv6Addr::from(octets)));
         }
         offset = rdata_end;
@@ -658,11 +651,10 @@ pub fn compute_response_ttl(
     Ok(http_ttl)
 }
 
-/// Decrements the 32-bit TTL of all non-OPT Resource Records in `packet` by `elapsed_secs` (RFC 1035 §6.2).
-pub fn decrement_wire_ttls(packet: &mut [u8], elapsed_secs: u32) -> Result<(), DohError> {
-    if elapsed_secs == 0 {
-        return Ok(());
-    }
+fn update_non_opt_wire_ttls<F>(packet: &mut [u8], mut transform: F) -> Result<(), DohError>
+where
+    F: FnMut(u32) -> u32,
+{
     let mut offset = skip_questions(packet)?;
     let total_rrs =
         (ancount(packet) as usize) + (nscount(packet) as usize) + (arcount(packet) as usize);
@@ -679,8 +671,7 @@ pub fn decrement_wire_ttls(packet: &mut [u8], elapsed_secs: u32) -> Result<(), D
         let rdlen = read_u16_be(packet, offset + 8)? as usize;
 
         if rr_type != RR_TYPE_OPT {
-            let new_ttl = rr_ttl.saturating_sub(elapsed_secs);
-            write_u32_be(packet, offset + 4, new_ttl)?;
+            write_u32_be(packet, offset + 4, transform(rr_ttl))?;
         }
         offset += 10 + rdlen;
         if offset > packet.len() {
@@ -690,44 +681,22 @@ pub fn decrement_wire_ttls(packet: &mut [u8], elapsed_secs: u32) -> Result<(), D
         }
     }
     Ok(())
+}
+
+/// Decrements the 32-bit TTL of all non-OPT Resource Records in `packet` by `elapsed_secs` (RFC 1035 §6.2).
+pub fn decrement_wire_ttls(packet: &mut [u8], elapsed_secs: u32) -> Result<(), DohError> {
+    if elapsed_secs == 0 {
+        return Ok(());
+    }
+    update_non_opt_wire_ttls(packet, |rr_ttl| rr_ttl.saturating_sub(elapsed_secs))
 }
 
 /// Sets the 32-bit TTL of all non-OPT Resource Records in `packet` to `fixed_ttl` (used by RFC 8767 §4 Serve-Stale).
 pub fn set_all_wire_ttls(packet: &mut [u8], fixed_ttl: u32) -> Result<(), DohError> {
-    let mut offset = skip_questions(packet)?;
-    let total_rrs =
-        (ancount(packet) as usize) + (nscount(packet) as usize) + (arcount(packet) as usize);
-
-    for _ in 0..total_rrs {
-        offset = skip_name(packet, offset)?;
-        if offset + 10 > packet.len() {
-            return Err(DohError::MalformedDnsPacket(
-                "truncated resource record header",
-            ));
-        }
-        let rr_type = read_u16_be(packet, offset)?;
-        let rdlen = read_u16_be(packet, offset + 8)? as usize;
-
-        if rr_type != RR_TYPE_OPT {
-            write_u32_be(packet, offset + 4, fixed_ttl)?;
-        }
-        offset += 10 + rdlen;
-        if offset > packet.len() {
-            return Err(DohError::MalformedDnsPacket(
-                "truncated resource record RDATA",
-            ));
-        }
-    }
-    Ok(())
+    update_non_opt_wire_ttls(packet, |_| fixed_ttl)
 }
 
-/// Appends an RFC 8914 Extended DNS Error (`EDE`, Option Code 15) to an existing DNS wire response's `OPT` record
-/// (or creates a new `OPT` record if none is present).
-pub fn append_ede_to_existing_response(
-    packet: &mut Vec<u8>,
-    info_code: u16,
-    extra_text: &str,
-) -> Result<(), DohError> {
+fn find_or_append_opt_record(packet: &mut Vec<u8>) -> Result<usize, DohError> {
     let mut offset = skip_questions(packet)?;
     let (an, ns, ar) = (ancount(packet), nscount(packet), arcount(packet));
 
@@ -738,6 +707,9 @@ pub fn append_ede_to_existing_response(
         }
         let rdlen = read_u16_be(packet, offset + 8)? as usize;
         offset += 10 + rdlen;
+        if offset > packet.len() {
+            return Err(DohError::MalformedDnsPacket("record out of bounds"));
+        }
     }
 
     let mut opt_type_offset: Option<usize> = None;
@@ -754,11 +726,20 @@ pub fn append_ede_to_existing_response(
         offset += 10 + rdlen;
     }
 
-    let opt_offset = match opt_type_offset {
-        Some(off) => off,
-        None => append_empty_opt_record(packet, UPSTREAM_EDNS_UDP_SIZE)?,
-    };
+    match opt_type_offset {
+        Some(off) => Ok(off),
+        None => append_empty_opt_record(packet, UPSTREAM_EDNS_UDP_SIZE),
+    }
+}
 
+/// Appends an RFC 8914 Extended DNS Error (`EDE`, Option Code 15) to an existing DNS wire response's `OPT` record
+/// (or creates a new `OPT` record if none is present).
+pub fn append_ede_to_existing_response(
+    packet: &mut Vec<u8>,
+    info_code: u16,
+    extra_text: &str,
+) -> Result<(), DohError> {
+    let opt_offset = find_or_append_opt_record(packet)?;
     let text_bytes = extra_text.as_bytes();
     let ede_opt_len = (2 + text_bytes.len()) as u16;
     let rdlen_offset = opt_offset + 8;
@@ -782,6 +763,34 @@ pub fn append_ede_to_existing_response(
     Ok(())
 }
 
+fn init_synthetic_response(
+    query: &[u8],
+    header_byte2_mask: u8,
+    response_rcode: u8,
+) -> Result<(ParsedQuestion, Vec<u8>), DohError> {
+    let parsed = validate_and_parse_query(query)?;
+    let mut resp = Vec::with_capacity(128);
+    resp.extend_from_slice(&query[..parsed.question_end_offset]);
+
+    let rd_bit = query[2] & 0x01;
+    let cd_bit = query[3] & 0x10;
+    resp[2] = header_byte2_mask | rd_bit;
+    resp[3] = 0x80 | cd_bit | (response_rcode & 0x0f);
+    write_u16_be(&mut resp, 6, 0)?;
+    write_u16_be(&mut resp, 8, 0)?;
+    write_u16_be(&mut resp, 10, 0)?;
+    Ok((parsed, resp))
+}
+
+fn append_compressed_answer_rr(resp: &mut Vec<u8>, rr_type: u16, ttl: u32, rdata: &[u8]) {
+    resp.extend_from_slice(&[0xc0, 0x0c]);
+    resp.extend_from_slice(&rr_type.to_be_bytes());
+    resp.extend_from_slice(&DNS_CLASS_IN.to_be_bytes());
+    resp.extend_from_slice(&ttl.to_be_bytes());
+    resp.extend_from_slice(&(rdata.len() as u16).to_be_bytes());
+    resp.extend_from_slice(rdata);
+}
+
 /// Synthesizes a local split-horizon `NOERROR` response from custom hosts entries (`A`, `AAAA`, or `PTR`).
 pub fn build_hosts_response(
     query: &[u8],
@@ -789,18 +798,7 @@ pub fn build_hosts_response(
     ptr_target: Option<&str>,
     ttl: u32,
 ) -> Result<Vec<u8>, DohError> {
-    let parsed = validate_and_parse_query(query)?;
-    let mut resp = Vec::with_capacity(128);
-    resp.extend_from_slice(&query[..parsed.question_end_offset]);
-
-    let rd_bit = query[2] & 0x01;
-    let cd_bit = query[3] & 0x10;
-    // QR=1, AA=1 (0x04), RD preserved, RA=1 (0x80), RCODE=0 (NOERROR)
-    resp[2] = 0x84 | rd_bit;
-    resp[3] = 0x80 | cd_bit;
-    write_u16_be(&mut resp, 6, 0)?;
-    write_u16_be(&mut resp, 8, 0)?;
-    write_u16_be(&mut resp, 10, 0)?;
+    let (parsed, mut resp) = init_synthetic_response(query, 0x84, RCODE_NOERROR)?;
 
     let mut an_count = 0u16;
     if parsed.qclass == DNS_CLASS_IN {
@@ -808,12 +806,7 @@ pub fn build_hosts_response(
             RR_TYPE_A => {
                 for ip in ips {
                     if let IpAddr::V4(v4) = ip {
-                        resp.extend_from_slice(&[0xc0, 0x0c]);
-                        resp.extend_from_slice(&RR_TYPE_A.to_be_bytes());
-                        resp.extend_from_slice(&DNS_CLASS_IN.to_be_bytes());
-                        resp.extend_from_slice(&ttl.to_be_bytes());
-                        resp.extend_from_slice(&4u16.to_be_bytes());
-                        resp.extend_from_slice(&v4.octets());
+                        append_compressed_answer_rr(&mut resp, RR_TYPE_A, ttl, &v4.octets());
                         an_count += 1;
                     }
                 }
@@ -821,12 +814,7 @@ pub fn build_hosts_response(
             RR_TYPE_AAAA => {
                 for ip in ips {
                     if let IpAddr::V6(v6) = ip {
-                        resp.extend_from_slice(&[0xc0, 0x0c]);
-                        resp.extend_from_slice(&RR_TYPE_AAAA.to_be_bytes());
-                        resp.extend_from_slice(&DNS_CLASS_IN.to_be_bytes());
-                        resp.extend_from_slice(&ttl.to_be_bytes());
-                        resp.extend_from_slice(&16u16.to_be_bytes());
-                        resp.extend_from_slice(&v6.octets());
+                        append_compressed_answer_rr(&mut resp, RR_TYPE_AAAA, ttl, &v6.octets());
                         an_count += 1;
                     }
                 }
@@ -841,12 +829,7 @@ pub fn build_hosts_response(
                         }
                     }
                     encoded_target.push(0);
-                    resp.extend_from_slice(&[0xc0, 0x0c]);
-                    resp.extend_from_slice(&RR_TYPE_PTR.to_be_bytes());
-                    resp.extend_from_slice(&DNS_CLASS_IN.to_be_bytes());
-                    resp.extend_from_slice(&ttl.to_be_bytes());
-                    resp.extend_from_slice(&(encoded_target.len() as u16).to_be_bytes());
-                    resp.extend_from_slice(&encoded_target);
+                    append_compressed_answer_rr(&mut resp, RR_TYPE_PTR, ttl, &encoded_target);
                     an_count += 1;
                 }
             }
@@ -927,59 +910,25 @@ pub fn build_policy_response(
     ede: Option<(u16, &str)>,
     ttl: u32,
 ) -> Result<Vec<u8>, DohError> {
-    let parsed = validate_and_parse_query(query)?;
-    let mut resp = Vec::with_capacity(128);
-
-    // Copy 12-byte header and Question section from client query
-    resp.extend_from_slice(&query[..parsed.question_end_offset]);
-
-    // Set QR=1 (Response), RD preserved, RA=1, and target RCODE
-    let rd_bit = query[2] & 0x01;
-    let cd_bit = query[3] & 0x10;
-    resp[2] = 0x80 | rd_bit;
-    resp[3] = 0x80 | cd_bit | (response_rcode & 0x0f);
-
-    // Reset ANCOUNT, NSCOUNT, ARCOUNT
-    write_u16_be(&mut resp, 6, 0)?;
-    write_u16_be(&mut resp, 8, 0)?;
-    write_u16_be(&mut resp, 10, 0)?;
+    let (parsed, mut resp) = init_synthetic_response(query, 0x80, response_rcode)?;
 
     // If null_sinkhole is requested and QTYPE is A (1) or AAAA (28), synthesize 0.0.0.0 or ::
     if null_sinkhole && parsed.qclass == DNS_CLASS_IN {
         match parsed.qtype {
             RR_TYPE_A => {
-                write_u16_be(&mut resp, 6, 1)?; // ANCOUNT = 1
-                resp.extend_from_slice(&[0xc0, 0x0c]); // Name pointer to QNAME at offset 12
-                resp.extend_from_slice(&RR_TYPE_A.to_be_bytes());
-                resp.extend_from_slice(&DNS_CLASS_IN.to_be_bytes());
-                resp.extend_from_slice(&ttl.to_be_bytes());
-                resp.extend_from_slice(&4u16.to_be_bytes());
-                resp.extend_from_slice(&[0, 0, 0, 0]);
+                write_u16_be(&mut resp, 6, 1)?;
+                append_compressed_answer_rr(&mut resp, RR_TYPE_A, ttl, &[0, 0, 0, 0]);
             }
             RR_TYPE_AAAA => {
-                write_u16_be(&mut resp, 6, 1)?; // ANCOUNT = 1
-                resp.extend_from_slice(&[0xc0, 0x0c]); // Name pointer to QNAME at offset 12
-                resp.extend_from_slice(&RR_TYPE_AAAA.to_be_bytes());
-                resp.extend_from_slice(&DNS_CLASS_IN.to_be_bytes());
-                resp.extend_from_slice(&ttl.to_be_bytes());
-                resp.extend_from_slice(&16u16.to_be_bytes());
-                resp.extend_from_slice(&[0u8; 16]);
+                write_u16_be(&mut resp, 6, 1)?;
+                append_compressed_answer_rr(&mut resp, RR_TYPE_AAAA, ttl, &[0u8; 16]);
             }
             _ => {}
         }
     }
 
     if let Some((info_code, extra_text)) = ede {
-        let opt_offset = append_empty_opt_record(&mut resp, UPSTREAM_EDNS_UDP_SIZE)?;
-        let text_bytes = extra_text.as_bytes();
-        let ede_opt_len = (2 + text_bytes.len()) as u16;
-        let rdlen_offset = opt_offset + 8;
-        let cur_rdlen = read_u16_be(&resp, rdlen_offset)?;
-        write_u16_be(&mut resp, rdlen_offset, cur_rdlen + 4 + ede_opt_len)?;
-        resp.extend_from_slice(&EDNS_OPT_EDE.to_be_bytes());
-        resp.extend_from_slice(&ede_opt_len.to_be_bytes());
-        resp.extend_from_slice(&info_code.to_be_bytes());
-        resp.extend_from_slice(text_bytes);
+        append_ede_to_existing_response(&mut resp, info_code, extra_text)?;
     }
 
     Ok(resp)
@@ -1122,36 +1071,7 @@ pub fn append_empty_opt_record(packet: &mut Vec<u8>, max_payload: u16) -> Result
 
 /// Pads the DNS message using EDNS0 Option Code 12 (`PADDING`, RFC 7830) to a 468-byte block multiple (RFC 8467 §4.1).
 pub fn apply_edns0_padding(packet: &mut Vec<u8>) -> Result<(), DohError> {
-    let mut offset = skip_questions(packet)?;
-    let (an, ns, ar) = (ancount(packet), nscount(packet), arcount(packet));
-
-    for _ in 0..((an as usize) + (ns as usize)) {
-        offset = skip_name(packet, offset)?;
-        let rdlen = read_u16_be(packet, offset + 8)? as usize;
-        offset += 10 + rdlen;
-        if offset > packet.len() {
-            return Err(DohError::MalformedDnsPacket("record out of bounds"));
-        }
-    }
-
-    let mut opt_type_offset: Option<usize> = None;
-    for _ in 0..(ar as usize) {
-        offset = skip_name(packet, offset)?;
-        if offset + 10 > packet.len() {
-            return Err(DohError::MalformedDnsPacket("truncated additional record"));
-        }
-        let rr_type = read_u16_be(packet, offset)?;
-        let rdlen = read_u16_be(packet, offset + 8)? as usize;
-        if rr_type == RR_TYPE_OPT {
-            opt_type_offset = Some(offset);
-        }
-        offset += 10 + rdlen;
-    }
-
-    let opt_offset = match opt_type_offset {
-        Some(off) => off,
-        None => append_empty_opt_record(packet, UPSTREAM_EDNS_UDP_SIZE)?,
-    };
+    let opt_offset = find_or_append_opt_record(packet)?;
 
     // RFC 8467 §4.1: Pad response to a multiple of 468 octets (including the 4-byte option header).
     let base_with_opt_header = packet.len() + 4;
