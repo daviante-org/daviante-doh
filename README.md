@@ -12,7 +12,7 @@
 [![Unsafe](https://img.shields.io/badge/unsafe-forbidden-success.svg)](src/lib.rs)
 [![License: Apache-2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
 
-**[Architecture & UML](docs/ARCHITECTURE.md)** • **[Global Standards & Security](docs/STANDARDS_AND_SECURITY.md)** • **[Usage Guide & Examples](docs/USAGE_GUIDE.md)** • **[Deployment Guide](docs/DEPLOYMENT.md)** • **[Helm Chart](charts/daviante-doh/README.md)** • **[Contributing](CONTRIBUTING.md)**
+**[Architecture & UML](docs/ARCHITECTURE.md)** • **[Global Standards & Security](docs/STANDARDS_AND_SECURITY.md)** • **[Usage Guide & Examples](docs/USAGE_GUIDE.md)** • **[OpenAPI 3.1 Spec](docs/openapi.yaml)** • **[Deployment Guide](docs/DEPLOYMENT.md)** • **[Helm Chart](charts/daviante-doh/README.md)** • **[Contributing](CONTRIBUTING.md)**
 
 Developed and maintained by **Daviante** (<https://daviante.org> | <https://github.com/daviante-org/daviante-doh>)
 
@@ -27,7 +27,9 @@ Developed and maintained by **Daviante** (<https://daviante.org> | <https://gith
 - **Oblivious DNS-over-HTTPS (`RFC 9230` ODoH)** — HPKE (`X25519HkdfSha256` / `HkdfSha256` / `Aes128Gcm`) encrypted `POST (application/oblivious-dns-message)` with a lock-free 2-key rotation grace ring and key discovery at `/.well-known/odohconfigs`.
 - **JSON DoH API (`RFC 3597` / Google & Cloudflare Spec)** — `GET /dns-query?name=...&type=...&do=...&cd=...` (`Accept: application/dns-json`).
 - **EDNS0 Hygiene, 468-Byte Padding & Client Subnet (`RFC 6891`, `RFC 7830`, `RFC 7871`, `RFC 8467`)** — Strict OPT stripping for non-EDNS clients, 468-byte response block padding, and trusted-proxy CIDR verified ECS forwarding.
-- **Protective DNS Policy & Extended DNS Errors (`RFC 8914`, `RFC 8482`)** — Fail-closed domain allowlist/blocklist (`nxdomain` + `EDE 15`, `refused` + `EDE 18`, `zero-ip` + `EDE 17`) with CNAME/DNAME answer-chain inspection and `QTYPE=ANY` refusal (`EDE 21`).
+- **Protective DNS Policy, Rebinding Protection, Split-Horizon Hosts & Extended DNS Errors (`RFC 8914`, `RFC 8482`)** — Lock-free hot-reloading domain allowlist/blocklist (`nxdomain` + `EDE 15`, `refused` + `EDE 18`, `zero-ip` + `EDE 17`), CNAME/DNAME answer-chain inspection, DNS rebinding protection (`--block-private-rebinding`), local `/etc/hosts` split-horizon (`A`/`AAAA`/`PTR`, `--hosts-file`), and `QTYPE=ANY` refusal (`EDE 21`).
+- **RFC 8767 Serve-Stale, Proactive Cache Prefetching & Singleflight Coalescing** — Survives upstream outages with `EDE 3 (Stale Answer)` (`--serve-stale-ttl`), refreshes hot cache entries in the final 10% of TTL (`--cache-prefetch`), and deduplicates identical in-flight cache misses (`Singleflight`).
+- **Multi-Strategy Upstream Load Balancing & Encrypted Upstream DoT (`RFC 7858`)** — Supports `failover`, `round-robin`, and `parallel` (fastest-wins race) upstream selection strategies plus encrypted upstream DNS-over-TLS (`:853`, `--upstream-dot-sni`).
 - **Cloud-Native Hardening** — Rootless `~10 MiB` Alpine 3.24 container (`USER 10001:0`, zero shell/curl runtime dependencies, built-in `--healthcheck`) and unified **Kubernetes & Red Hat OpenShift (`restricted-v2` SCC)** Helm chart ([`charts/daviante-doh/`](charts/daviante-doh/)).
 
 ---
@@ -39,6 +41,7 @@ Developed and maintained by **Daviante** (<https://daviante.org> | <https://gith
 | **[`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)** | End-to-end **UML Component**, **UML Class**, **UML Sequence**, and **UML State** diagrams covering the DoH/JSON/ODoH pipeline, 16-shard `DnsCache`, 30s upstream circuit breaker, and module internals. |
 | **[`docs/STANDARDS_AND_SECURITY.md`](docs/STANDARDS_AND_SECURITY.md)** | Complete rule-by-rule specification of all **20 IETF RFC, W3C, OWASP, and Kubernetes/OpenShift security standards** enforced by `daviante-doh`. |
 | **[`docs/USAGE_GUIDE.md`](docs/USAGE_GUIDE.md)** | Practical CLI guide, client query examples (`curl`, `kdig`, Node.js HTTP/2, Python, ODoH HPKE), enterprise recipes (allow/blocklists, caching, rate limiting, ECS, Prometheus `/metrics`), and **Rust Library SDK** embedding examples. |
+| **[`docs/openapi.yaml`](docs/openapi.yaml)** | Complete **OpenAPI 3.1.0 / Swagger Specification** for `/dns-query` (`GET`/`POST`/`OPTIONS`), `/.well-known/odohconfigs`, `/livez`, `/readyz`, `/healthz`, and `/metrics`. |
 | **[`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md)** | Production deployment topologies and step-by-step guides for **Docker**, **Rootless Podman**, **Docker Compose**, **Kubernetes (MetalLB LoadBalancer + Ingress)**, **Red Hat OpenShift (`Route` + `restricted-v2` SCC)**, and cross-platform builds. |
 | **[`charts/daviante-doh/README.md`](charts/daviante-doh/README.md)** | Dedicated Helm chart reference with complete `values.yaml` parameter table, schema validation, and Kubernetes/OpenShift installation recipes. |
 
@@ -133,6 +136,11 @@ flowchart LR
 | `DOH_STALE_IF_ERROR_SECS` | `--stale-if-error-secs` | `0` | Optional RFC 5861 `stale-if-error` directive (`0` = disabled) |
 | `DOH_STALE_WHILE_REVALIDATE_SECS` | `--stale-while-revalidate-secs` | `0` | Optional RFC 5861 `stale-while-revalidate` directive (`0` = disabled) |
 | `DOH_CACHE_SIZE` | `--cache-size` | `0` | In-memory 16-shard DNS cache capacity (`0` = disabled by default) |
+| `DOH_SERVE_STALE_TTL` | `--serve-stale-ttl` | `0` | RFC 8767 serve-stale retention window in seconds on upstream outage (`0` = disabled) |
+| `DOH_CACHE_PREFETCH` | `--cache-prefetch` | `false` | Proactively refresh hot cached entries when remaining TTL drops below 10% |
+| `DOH_DISABLE_COALESCING` | `--disable-coalescing` | `false` | Disable Singleflight in-flight query coalescing for identical concurrent cache misses |
+| `DOH_UPSTREAM_STRATEGY` | `--upstream-strategy` | `failover` | Upstream load-balancing strategy: `failover`, `round-robin`, or `parallel` |
+| `DOH_UPSTREAM_DOT_SNI` | `--upstream-dot-sni` | *(optional)* | Enable RFC 7858 Upstream DNS-over-TLS (`DoT`) with the specified TLS SNI hostname |
 | `DOH_DISABLE_KEEPALIVE` | `-K, --disable-keepalive` | `false` | Disable HTTP keepalive |
 | `DOH_DISABLE_POST` | `-P, --disable-post` | `false` | Disable standard DoH `POST` queries |
 | `DOH_ALLOW_ODOH_POST` | `-O, --allow-odoh-post` | `false` | Allow ODoH `POST` when `--disable-post` is set |
@@ -142,9 +150,11 @@ flowchart LR
 | `DOH_ECS_PREFIX_V4` | `--ecs-prefix-v4` | `24` | IPv4 prefix length for ECS (`0`–`32`) |
 | `DOH_ECS_PREFIX_V6` | `--ecs-prefix-v6` | `56` | IPv6 prefix length for ECS (`0`–`128`) |
 | `DOH_ODOH_ROTATION_SECS` | `--odoh-rotation-secs` | `86400` | ODoH HPKE key rotation interval in seconds (`60`–`604800`) |
-| `DOH_ALLOWLIST_FILE` | `--allowlist-file` | *(optional)* | Path to Protective DNS domain allowlist file (fails closed if missing) |
-| `DOH_BLOCKLIST_FILE` | `--blocklist-file` | *(optional)* | Path to Protective DNS domain blocklist file (fails closed if missing) |
+| `DOH_ALLOWLIST_FILE` | `--allowlist-file` | *(optional)* | Path to Protective DNS domain allowlist file (fails closed if missing; hot-reloaded) |
+| `DOH_BLOCKLIST_FILE` | `--blocklist-file` | *(optional)* | Path to Protective DNS domain blocklist file (fails closed if missing; hot-reloaded) |
+| `DOH_HOSTS_FILE` | `--hosts-file` | *(optional)* | Path to local split-horizon `/etc/hosts` override file (`A`, `AAAA`, `PTR`; hot-reloaded) |
 | `DOH_BLOCK_ACTION` | `--block-action` | `nxdomain` | Block action: `nxdomain` (`EDE 15`), `refused` (`EDE 18`), or `zero-ip` (`EDE 17`) |
+| `DOH_BLOCK_PRIVATE_REBINDING` | `--block-private-rebinding` | `false` | Block upstream responses resolving public domains to private/loopback/link-local IPs |
 | `DOH_RATE_LIMIT_RPS` | `--rate-limit-rps` | `0` | Per-IP rate limit in requests/sec (`0` = disabled by default) |
 | `DOH_RATE_LIMIT_BURST` | `--rate-limit-burst` | `20` | Per-IP token-bucket burst capacity |
 | `DOH_RATE_LIMIT_V6_PREFIX` | `--rate-limit-v6-prefix` | `64` | IPv6 prefix length aggregated into a single rate-limit bucket |

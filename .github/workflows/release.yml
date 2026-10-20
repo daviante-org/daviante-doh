@@ -7,7 +7,15 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: "Release SemVer (e.g. 0.1.0). Leave empty to use version from Cargo.toml"
+        description: "Release SemVer (e.g. 0.2.0). Leave empty to use version from Cargo.toml"
+        required: false
+        default: ""
+      release_title:
+        description: "Optional custom release title (defaults to annotated git tag subject or standard title)"
+        required: false
+        default: ""
+      release_notes:
+        description: "Optional custom release notes / highlights Markdown (defaults to git tag message or CHANGELOG.md)"
         required: false
         default: ""
 
@@ -157,11 +165,14 @@ jobs:
           HELM_DIGEST="$(echo "${PUSH_OUT}" | awk '/^Digest:/ {print $2; exit}')"
           echo "digest=${HELM_DIGEST:-sha256:published}" >> "$GITHUB_OUTPUT"
 
-      - name: Generate SHA256SUMS & Enterprise Release Notes
+      - name: Generate SHA256SUMS & Dynamic Release Notes
         env:
           VERSION: ${{ steps.meta.outputs.version }}
           IMAGE_DIGEST: ${{ steps.container.outputs.digest }}
           HELM_DIGEST: ${{ steps.helm.outputs.digest }}
+          RELEASE_TITLE: ${{ inputs.release_title }}
+          RELEASE_NOTES_BODY: ${{ inputs.release_notes }}
+          RELEASE_TITLE_FILE: ./dist/RELEASE_TITLE.txt
         run: |
           (
             cd ./dist
@@ -184,15 +195,28 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           VERSION: ${{ steps.meta.outputs.version }}
           TAG: ${{ steps.meta.outputs.tag }}
+          INPUT_TITLE: ${{ inputs.release_title }}
+          INPUT_NOTES: ${{ inputs.release_notes }}
         run: |
-          if ! git rev-parse "${TAG}" >/dev/null 2>&1; then
+          if [ -s ./dist/RELEASE_TITLE.txt ]; then
+            TITLE="$(head -n 1 ./dist/RELEASE_TITLE.txt)"
+          elif [ -n "${INPUT_TITLE}" ]; then
+            TITLE="${INPUT_TITLE}"
+          else
+            TITLE="daviante-doh ${TAG} — Enterprise Production Release"
+          fi
+
+          if ! git rev-parse -q --verify "refs/tags/${TAG}" >/dev/null 2>&1; then
             git config user.name "github-actions[bot]"
             git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-            git tag -a "${TAG}" -m "Release ${TAG}"
+            if [ -n "${INPUT_NOTES}" ]; then
+              git tag -a "${TAG}" -m "${TITLE}" -m "${INPUT_NOTES}"
+            else
+              git tag -a "${TAG}" -m "${TITLE}"
+            fi
             git push origin "${TAG}"
           fi
 
-          TITLE="daviante-doh ${TAG} — Enterprise Production Release"
           if gh release view "${TAG}" >/dev/null 2>&1; then
             gh release edit "${TAG}" \
               --title "${TITLE}" \

@@ -48,6 +48,11 @@ config:
   staleIfErrorSecs: "0"
   staleWhileRevalidateSecs: "0"
   cacheSize: "0"
+  serveStaleTtl: "0"
+  cachePrefetch: "false"
+  disableCoalescing: "false"
+  upstreamStrategy: "failover"
+  upstreamDotSni: ""
   disableKeepalive: "false"
   disablePost: "false"
   allowOdohPost: "false"
@@ -59,7 +64,9 @@ config:
   odohRotationSecs: "86400"
   allowlistFile: ""
   blocklistFile: ""
+  hostsFile: ""
   blockAction: "nxdomain"
+  blockPrivateRebinding: "false"
   rateLimitRps: "0"
   rateLimitBurst: "20"
   rateLimitV6Prefix: "64"
@@ -78,6 +85,7 @@ policy:
   existingConfigMap: ""
   allowlist: []
   blocklist: []
+  hosts: []
 
 # Optional built-in TLS using a Kubernetes TLS Secret (mounts at /etc/daviante-doh/certs)
 tls:

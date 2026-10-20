@@ -1,7 +1,12 @@
 #!/usr/bin/env sh
 # =============================================================================
-# Enterprise Production Release Notes Generator for daviante-doh
-# Generates a comprehensive Markdown release document for GitHub Releases.
+# Dynamic Release Notes Generator for daviante-doh
+#
+# Resolves release highlights dynamically from (in priority order):
+#   1. Explicit RELEASE_NOTES_BODY environment variable (e.g. workflow_dispatch)
+#   2. Annotated Git tag message (`git tag -a vX.Y.Z -m "..."`)
+#   3. Matching `## [X.Y.Z]` or `## [Unreleased]` section in CHANGELOG.md
+# Plus dynamic supply-chain coordinates, commit log, and SHA-256 checksums.
 # =============================================================================
 set -eu
 
@@ -10,109 +15,203 @@ IMAGE_DIGEST="${2:-sha256:pending}"
 HELM_DIGEST="${3:-sha256:pending}"
 SHA256SUMS_FILE="${4:-./dist/SHA256SUMS}"
 OUTPUT_FILE="${5:-./dist/RELEASE_NOTES.md}"
+CHANGELOG_FILE="${CHANGELOG_FILE:-./CHANGELOG.md}"
 
 TAG="v${VERSION}"
-REPO="daviante-org/daviante-doh"
-IMAGE_REPO="ghcr.io/daviante-org/daviante-doh"
-HELM_OCI_URI="oci://ghcr.io/daviante-org/charts/daviante-doh"
+REPO="${GITHUB_REPOSITORY:-daviante-org/daviante-doh}"
+REPO_OWNER="$(echo "${REPO}" | cut -d/ -f1 | tr '[:upper:]' '[:lower:]')"
+REPO_NAME="$(echo "${REPO}" | cut -d/ -f2)"
+IMAGE_REPO="${IMAGE_REPO:-ghcr.io/${REPO_OWNER}/${REPO_NAME}}"
+HELM_OCI_URI="${HELM_OCI_URI:-oci://ghcr.io/${REPO_OWNER}/charts/${REPO_NAME}}"
 RELEASE_DATE="$(date -u +%Y-%m-%d)"
 
+# -----------------------------------------------------------------------------
+# 1. Extract Annotated Git Tag Subject & Body (if tag exists and is annotated)
+# -----------------------------------------------------------------------------
+TAG_SUBJECT=""
+TAG_BODY=""
+if git rev-parse -q --verify "refs/tags/${TAG}" >/dev/null 2>&1; then
+    OBJ_TYPE="$(git for-each-ref "refs/tags/${TAG}" --format='%(objecttype)')"
+    if [ "${OBJ_TYPE}" = "tag" ]; then
+        RAW_SUBJ="$(git for-each-ref "refs/tags/${TAG}" --format='%(contents:subject)')"
+        RAW_BODY="$(git for-each-ref "refs/tags/${TAG}" --format='%(contents:body)')"
+        # Ignore default auto-generated placeholder messages like "Release v0.1.0"
+        if [ -n "${RAW_SUBJ}" ] && [ "${RAW_SUBJ}" != "Release ${TAG}" ] && [ "${RAW_SUBJ}" != "${TAG}" ]; then
+            TAG_SUBJECT="${RAW_SUBJ}"
+        fi
+        if [ -n "${RAW_BODY}" ]; then
+            TAG_BODY="${RAW_BODY}"
+        elif [ -n "${TAG_SUBJECT}" ]; then
+            TAG_BODY="${TAG_SUBJECT}"
+        fi
+    fi
+fi
+
+# -----------------------------------------------------------------------------
+# 2. Extract matching version section (or [Unreleased]) from CHANGELOG.md
+# -----------------------------------------------------------------------------
+CHANGELOG_SECTION=""
+if [ -f "${CHANGELOG_FILE}" ]; then
+    # Try exact version heading first: ## [X.Y.Z] or ## [vX.Y.Z]
+    CHANGELOG_SECTION="$(awk -v ver="${VERSION}" '
+        /^## \[/ {
+            if (in_section) exit;
+            if ($0 ~ "^## \\[v?" ver "\\]") {
+                in_section = 1;
+                next;
+            }
+        }
+        /^---$/ {
+            if (in_section) next;
+        }
+        in_section { print }
+    ' "${CHANGELOG_FILE}" | sed -e '/./,$!d' -e :a -e '/^\n*$/{$d;N;ba' -e '}' || true)"
+
+    # Fallback to ## [Unreleased] if exact version heading is not found
+    if [ -z "${CHANGELOG_SECTION}" ]; then
+        CHANGELOG_SECTION="$(awk '
+            /^## \[Unreleased\]/ {
+                in_section = 1;
+                next;
+            }
+            /^## \[/ {
+                if (in_section) exit;
+            }
+            /^---$/ {
+                if (in_section) next;
+            }
+            in_section { print }
+        ' "${CHANGELOG_FILE}" | sed -e '/./,$!d' -e :a -e '/^\n*$/{$d;N;ba' -e '}' || true)"
+    fi
+fi
+
+# -----------------------------------------------------------------------------
+# 3. Resolve Dynamic Release Title & Release Notes Body
+# -----------------------------------------------------------------------------
+if [ -n "${RELEASE_TITLE:-}" ]; then
+    FINAL_TITLE="${RELEASE_TITLE}"
+elif [ -n "${TAG_SUBJECT}" ]; then
+    FINAL_TITLE="\`${REPO_NAME}\` \`${TAG}\` — ${TAG_SUBJECT}"
+else
+    FINAL_TITLE="\`${REPO_NAME}\` \`${TAG}\` — Enterprise Production Release"
+fi
+
+# Plain-text title (without markdown backticks) for GitHub Release UI title
+PLAIN_TITLE="$(echo "${FINAL_TITLE}" | tr -d '`')"
+if [ -n "${RELEASE_TITLE_FILE:-}" ]; then
+    printf '%s\n' "${PLAIN_TITLE}" > "${RELEASE_TITLE_FILE}"
+fi
+
+HIGHLIGHTS_CONTENT=""
+if [ -n "${RELEASE_NOTES_BODY:-}" ]; then
+    HIGHLIGHTS_CONTENT="${RELEASE_NOTES_BODY}"
+elif [ -n "${TAG_BODY}" ]; then
+    if [ -n "${TAG_SUBJECT}" ] && [ "${TAG_BODY}" != "${TAG_SUBJECT}" ]; then
+        HIGHLIGHTS_CONTENT="### ${TAG_SUBJECT}
+
+${TAG_BODY}"
+    else
+        HIGHLIGHTS_CONTENT="${TAG_BODY}"
+    fi
+    # If CHANGELOG_SECTION also has structured details not identical to TAG_BODY, append it
+    if [ -n "${CHANGELOG_SECTION}" ]; then
+        HIGHLIGHTS_CONTENT="${HIGHLIGHTS_CONTENT}
+
+${CHANGELOG_SECTION}"
+    fi
+elif [ -n "${CHANGELOG_SECTION}" ]; then
+    HIGHLIGHTS_CONTENT="${CHANGELOG_SECTION}"
+else
+    HIGHLIGHTS_CONTENT="Production release \`${TAG}\` of \`${REPO_NAME}\`."
+fi
+
+# -----------------------------------------------------------------------------
+# 4. Resolve Previous Tag & Git Commit Log
+# -----------------------------------------------------------------------------
+if git rev-parse -q --verify "refs/tags/${TAG}" >/dev/null 2>&1; then
+    END_REF="${TAG}"
+else
+    END_REF="HEAD"
+fi
+
 PREV_TAG="$(git tag --sort=-v:refname | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+' | grep -v "^${TAG}$" | head -n 1 || true)"
-if [ -n "$PREV_TAG" ]; then
-    COMMIT_LOG="$(git log "${PREV_TAG}..HEAD" --pretty=format:'- `%h` %s (%an)' --no-merges || true)"
+if [ -n "${PREV_TAG}" ]; then
+    COMMIT_LOG="$(git log "${PREV_TAG}..${END_REF}" --pretty=format:'- `%h` %s (%an)' --no-merges || true)"
     COMPARE_URL="https://github.com/${REPO}/compare/${PREV_TAG}...${TAG}"
 else
-    COMMIT_LOG="$(git log -n 25 --pretty=format:'- `%h` %s (%an)' --no-merges || true)"
+    COMMIT_LOG="$(git log -n 25 "${END_REF}" --pretty=format:'- `%h` %s (%an)' --no-merges || true)"
     COMPARE_URL="https://github.com/${REPO}/commits/${TAG}"
 fi
 
-if [ -f "$SHA256SUMS_FILE" ]; then
-    CHECKSUMS="$(cat "$SHA256SUMS_FILE")"
+if [ -z "${COMMIT_LOG}" ]; then
+    COMMIT_LOG="- No new commits since \`${PREV_TAG:-initial}\`."
+fi
+
+if [ -f "${SHA256SUMS_FILE}" ]; then
+    CHECKSUMS="$(cat "${SHA256SUMS_FILE}")"
 else
     CHECKSUMS="No checksums file found at ${SHA256SUMS_FILE}"
 fi
 
-cat > "$OUTPUT_FILE" <<EOF
-# \`daviante-doh\` \`${TAG}\` — Enterprise Production Release
+# -----------------------------------------------------------------------------
+# 5. Render Markdown Release Document
+# -----------------------------------------------------------------------------
+cat > "${OUTPUT_FILE}" <<EOF
+# ${FINAL_TITLE}
 
 > **Release Date:** \`${RELEASE_DATE}\` • **Version:** \`${VERSION}\` • **License:** \`Apache-2.0\` • **Maintainer:** [Daviante](https://daviante.org)
 
-**\`daviante-doh\` \`${TAG}\`** is a production-hardened, zero-telemetry Rust library (\`daviante_doh\`) and standalone server binary (\`daviante-doh\`) implementing **DNS-over-HTTPS (\`RFC 8484\`)**, **Oblivious DoH (\`RFC 9230\` HPKE)**, **JSON DoH (\`RFC 3597\` / Google & Cloudflare Spec)**, **EDNS0 468-byte Block Padding (\`RFC 8467\`)**, and **Protective DNS Policy Enforcement (\`RFC 8914\` Extended DNS Errors)**.
+---
+
+## 1. What's New in \`${TAG}\`
+
+${HIGHLIGHTS_CONTENT}
 
 ---
 
-## 1. Published Artifacts & Supply-Chain Coordinates
+## 2. Published Artifacts & Supply-Chain Coordinates
 
 | Artifact Type | Target Platform / Format | Registry / Download Coordinate | Digest / Integrity |
 | :--- | :--- | :--- | :--- |
 | **Multi-Arch Container Image** | \`linux/amd64\`, \`linux/arm64\` (Alpine 3.24 Rootless \`UID 10001:0\`) | \`${IMAGE_REPO}:${VERSION}\`<br/>\`${IMAGE_REPO}:latest\` | \`${IMAGE_DIGEST}\` |
 | **Unified Helm Chart (OCI)** | Kubernetes \`1.24+\` & Red Hat OpenShift \`4.12+\` (\`restricted-v2\` SCC) | \`${HELM_OCI_URI}:${VERSION}\` | \`${HELM_DIGEST}\` |
-| **Helm Chart Archive** | Helm v3 Package (\`.tgz\`) | [\`daviante-doh-${VERSION}.tgz\`](https://github.com/${REPO}/releases/download/${TAG}/daviante-doh-${VERSION}.tgz) | Verified in \`SHA256SUMS\` |
-| **Linux Static Binary (x86_64)** | \`x86_64-unknown-linux-musl\` (Static ELF) | [\`daviante-doh-linux-amd64\`](https://github.com/${REPO}/releases/download/${TAG}/daviante-doh-linux-amd64) | Verified in \`SHA256SUMS\` |
-| **Linux Static Binary (ARM64)** | \`aarch64-unknown-linux-musl\` (Static ELF) | [\`daviante-doh-linux-arm64\`](https://github.com/${REPO}/releases/download/${TAG}/daviante-doh-linux-arm64) | Verified in \`SHA256SUMS\` |
-| **Windows Standalone Binary** | \`x86_64-pc-windows-gnu\` (PE32+ Executable) | [\`daviante-doh-windows-amd64.exe\`](https://github.com/${REPO}/releases/download/${TAG}/daviante-doh-windows-amd64.exe) | Verified in \`SHA256SUMS\` |
+| **Helm Chart Archive** | Helm v3 Package (\`.tgz\`) | [\`${REPO_NAME}-${VERSION}.tgz\`](https://github.com/${REPO}/releases/download/${TAG}/${REPO_NAME}-${VERSION}.tgz) | Verified in \`SHA256SUMS\` |
+| **Linux Static Binary (x86_64)** | \`x86_64-unknown-linux-musl\` (Static ELF) | [\`${REPO_NAME}-linux-amd64\`](https://github.com/${REPO}/releases/download/${TAG}/${REPO_NAME}-linux-amd64) | Verified in \`SHA256SUMS\` |
+| **Linux Static Binary (ARM64)** | \`aarch64-unknown-linux-musl\` (Static ELF) | [\`${REPO_NAME}-linux-arm64\`](https://github.com/${REPO}/releases/download/${TAG}/${REPO_NAME}-linux-arm64) | Verified in \`SHA256SUMS\` |
+| **Windows Standalone Binary** | \`x86_64-pc-windows-gnu\` (PE32+ Executable) | [\`${REPO_NAME}-windows-amd64.exe\`](https://github.com/${REPO}/releases/download/${TAG}/${REPO_NAME}-windows-amd64.exe) | Verified in \`SHA256SUMS\` |
 
 ---
 
-## 2. Production Deployment Quick-Start
+## 3. Quick-Start Deployment
 
-### 2.1 Container Runtime (Docker / Rootless Podman)
+### 3.1 Container Runtime (Docker / Rootless Podman)
 \`\`\`bash
-# Pull by version tag
+# Pull by version tag or immutable SHA-256 manifest digest
 docker pull ${IMAGE_REPO}:${VERSION}
-
-# Or pull by immutable SHA-256 manifest digest (recommended for high-assurance production)
 docker pull ${IMAGE_REPO}@${IMAGE_DIGEST}
 
 # Run with hardened rootless flags
-docker run -d --name daviante-doh \\
+docker run -d --name ${REPO_NAME} \\
   --read-only --cap-drop=ALL --security-opt no-new-privileges:true \\
   -p 3000:3000 \\
   -e DOH_SERVER_ADDRESS="9.9.9.9:53,1.1.1.1:53" \\
   -e DOH_CACHE_SIZE="10000" \\
+  -e DOH_SERVE_STALE_TTL="86400" \\
+  -e DOH_CACHE_PREFETCH="true" \\
   -e DOH_ENABLE_METRICS="true" \\
   ${IMAGE_REPO}:${VERSION}
 \`\`\`
 
-### 2.2 Kubernetes & Red Hat OpenShift via GHCR OCI Helm Registry
+### 3.2 Kubernetes & Red Hat OpenShift (GHCR OCI Helm Chart)
 \`\`\`bash
-# Standard Kubernetes (LoadBalancer + 10k In-Memory Cache)
-helm upgrade --install daviante-doh ${HELM_OCI_URI} \\
+helm upgrade --install ${REPO_NAME} ${HELM_OCI_URI} \\
   --version ${VERSION} \\
-  --namespace daviante-doh --create-namespace \\
-  --set service.type=LoadBalancer \\
+  --namespace ${REPO_NAME} --create-namespace \\
   --set config.serverAddress="9.9.9.9:53\\,1.1.1.1:53" \\
-  --set config.cacheSize="10000"
-
-# Red Hat OpenShift (restricted-v2 SCC + OpenShift Route with reencrypt TLS)
-helm upgrade --install daviante-doh ${HELM_OCI_URI} \\
-  --version ${VERSION} \\
-  --namespace daviante-doh \\
-  --set tls.enabled=true \\
-  --set tls.secretName=daviante-doh-tls \\
-  --set route.enabled=true \\
-  --set route.host="doh.apps.ocp.example.com" \\
-  --set route.tls.enabled=true \\
-  --set route.tls.termination=reencrypt
+  --set config.cacheSize="10000" \\
+  --set config.serveStaleTtl="86400" \\
+  --set config.cachePrefetch="true"
 \`\`\`
-
-### 2.3 Standalone Binary Verification
-\`\`\`bash
-curl -fsSLO "https://github.com/${REPO}/releases/download/${TAG}/daviante-doh-linux-amd64"
-curl -fsSLO "https://github.com/${REPO}/releases/download/${TAG}/SHA256SUMS"
-grep "daviante-doh-linux-amd64" SHA256SUMS | sha256sum -c -
-chmod +x daviante-doh-linux-amd64
-./daviante-doh-linux-amd64 --version
-\`\`\`
-
----
-
-## 3. Standards Compliance, Security Posture & Verification Summary
-
-- **Memory & Panic Safety**: \`#![forbid(unsafe_code)]\` and \`#![deny(clippy::unwrap_used)]\` enforced across library and binary targets.
-- **IETF RFC Compliance**: \`RFC 8484\` (DoH), \`RFC 9230\` (Oblivious DoH HPKE), \`RFC 6891\`/\`7830\`/\`8467\` (EDNS0 & 468-byte block padding), \`RFC 7871\`/\`7239\` (Trusted-Proxy ECS), \`RFC 8914\` (Extended DNS Errors), \`RFC 8482\` (\`QTYPE=ANY\` refusal), \`RFC 9111\`/\`5861\` (HTTP caching & SWR/SIE), and \`RFC 5452\`/\`7766\` (CSPRNG TXID, \`0x20\` bit-case check, persistent TCP \`:53\` fallback).
-- **Multi-Environment Black-Box Verification**: Verified against the **219-case live Black-Box API & Protocol Matrix** across Standalone Container (\`73/73 PASS\`), Kubernetes \`kind\` + MetalLB LoadBalancer + Ingress (\`73/73 PASS\`), and Red Hat OpenShift \`Route\` + HAProxy Router under \`restricted-v2\` SCC (\`73/73 PASS\`).
-- **Container & Supply-Chain Security**: Scanned with **Trivy \`v0.76.0\`** (\`0 CRITICAL / 0 HIGH\` vulnerabilities) and **\`cargo-deny\`** license/advisory gates.
 
 ---
 
@@ -120,7 +219,7 @@ chmod +x daviante-doh-linux-amd64
 
 ${COMMIT_LOG}
 
-**Full Changelog:** <${COMPARE_URL}>
+**Full Diff:** <${COMPARE_URL}>
 
 ---
 

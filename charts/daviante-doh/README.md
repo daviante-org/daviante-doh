@@ -2,7 +2,7 @@
 
 <div align="center">
 
-**[Project Home](../../README.md)** • **[Architecture & UML](../../docs/ARCHITECTURE.md)** • **[Global Standards & Security](../../docs/STANDARDS_AND_SECURITY.md)** • **[Usage Guide](../../docs/USAGE_GUIDE.md)** • **[Deployment Guide](../../docs/DEPLOYMENT.md)**
+**[Project Home](../../README.md)** • **[Architecture & UML](../../docs/ARCHITECTURE.md)** • **[Global Standards & Security](../../docs/STANDARDS_AND_SECURITY.md)** • **[Usage Guide](../../docs/USAGE_GUIDE.md)** • **[OpenAPI 3.1 Spec](../../docs/openapi.yaml)** • **[Deployment Guide](../../docs/DEPLOYMENT.md)**
 
 </div>
 
@@ -15,11 +15,11 @@ This directory contains the official Helm chart for **`daviante-doh`** (`0.1.0`)
 ### Included Kubernetes & OpenShift Resources
 - [`templates/deployment.yaml`](templates/deployment.yaml) — Rootless `Deployment` with pod anti-affinity, `/livez` & `/readyz` HTTP/HTTPS probes, and automatic ConfigMap checksum rollouts.
 - [`templates/configmap.yaml`](templates/configmap.yaml) — Maps all `values.config.*` settings to `DOH_*` environment variables.
-- [`templates/policy-configmap.yaml`](templates/policy-configmap.yaml) — Mounts inline `policy.allowlist` / `policy.blocklist` domain rules at `/etc/daviante-doh/policy`.
+- [`templates/policy-configmap.yaml`](templates/policy-configmap.yaml) — Mounts inline `policy.allowlist`, `policy.blocklist`, and `policy.hosts` domain/hosts rules at `/etc/daviante-doh/policy` (automatically hot-reloaded by `daviante-doh` on update).
 - [`templates/service.yaml`](templates/service.yaml) — Exposes the primary DoH port (`3000`) and optional dedicated `http-admin` port (`9090`).
 - [`templates/ingress.yaml`](templates/ingress.yaml) — Standard `networking.k8s.io/v1` `Ingress`.
 - [`templates/route.yaml`](templates/route.yaml) — Red Hat OpenShift `route.openshift.io/v1` `Route` (`edge`, `reencrypt`, or `passthrough`).
-- [`templates/networkpolicy.yaml`](templates/networkpolicy.yaml) — Zero-trust ingress/egress `NetworkPolicy` (permits DNS `:53` UDP/TCP egress to upstream resolvers).
+- [`templates/networkpolicy.yaml`](templates/networkpolicy.yaml) — Zero-trust ingress/egress `NetworkPolicy` (permits DNS `:53` UDP/TCP and `:853` DoT egress to upstream resolvers).
 - [`templates/servicemonitor.yaml`](templates/servicemonitor.yaml) — Prometheus Operator `monitoring.coreos.com/v1` `ServiceMonitor`.
 - [`templates/hpa.yaml`](templates/hpa.yaml) & [`templates/pdb.yaml`](templates/pdb.yaml) — `HorizontalPodAutoscaler` (`autoscaling/v2`) and `PodDisruptionBudget` (`policy/v1`).
 - [`templates/tests/test-connection.yaml`](templates/tests/test-connection.yaml) — `helm test` hook Pod executing `/usr/local/bin/daviante-doh --healthcheck`.
@@ -84,13 +84,18 @@ helm upgrade --install daviante-doh ./charts/daviante-doh \
 | `config.maxConcurrent` | `int` | `16` | Max concurrent HTTP/2 streams per connection (`DOH_MAX_CONCURRENT`) |
 | `config.maxConnsPerIp` | `int` | `0` | Per-IP TCP connection limit (`0` = disabled) (`DOH_MAX_CONNS_PER_IP`) |
 | `config.timeout` | `int` | `10` | Per-request timeout in seconds (`DOH_TIMEOUT`) |
-| `config.shutdownGracePeriod` | `int` | `15` | Graceful `SIGTERM` drain timeout in seconds (`DOH_SHUTDOWN_GRACE_PERIOD`) |
+| `config.shutdownGracePeriod` | `int` | `15` | Graceful `SIGTERM` drain timeout in seconds (`DOH_SHUTDOWN_GRACE_SECS`) |
 | `config.minTtl` | `int` | `0` | Minimum caching TTL floor in seconds (`DOH_MIN_TTL`) |
 | `config.maxTtl` | `int` | `604800` | Maximum caching TTL ceiling in seconds (`DOH_MAX_TTL`) |
 | `config.errTtl` | `int` | `2` | Error response caching TTL in seconds (`DOH_ERR_TTL`) |
-| `config.staleIfErrorSecs` | `int` | `0` | RFC 5861 `stale-if-error` directive (`0` = disabled) |
-| `config.staleWhileRevalidateSecs` | `int` | `0` | RFC 5861 `stale-while-revalidate` directive (`0` = disabled) |
+| `config.staleIfErrorSecs` | `int` | `0` | RFC 5861 `stale-if-error` directive (`0` = disabled) (`DOH_STALE_IF_ERROR`) |
+| `config.staleWhileRevalidateSecs` | `int` | `0` | RFC 5861 `stale-while-revalidate` directive (`0` = disabled) (`DOH_STALE_WHILE_REVALIDATE`) |
 | `config.cacheSize` | `int` | `0` | In-memory 16-shard DNS cache capacity (`0` = disabled) (`DOH_CACHE_SIZE`) |
+| `config.serveStaleTtl` | `int` | `0` | RFC 8767 serve-stale retention window in seconds (`0` = disabled) (`DOH_SERVE_STALE_TTL`) |
+| `config.cachePrefetch` | `bool` | `false` | Proactive background cache refresh in final 10% of TTL (`DOH_CACHE_PREFETCH`) |
+| `config.disableCoalescing` | `bool` | `false` | Disable Singleflight in-flight query coalescing (`DOH_DISABLE_COALESCING`) |
+| `config.upstreamStrategy` | `string` | `"failover"` | Upstream load-balancing strategy: `failover`, `round-robin`, or `parallel` (`DOH_UPSTREAM_STRATEGY`) |
+| `config.upstreamDotSni` | `string` | `""` | Enable RFC 7858 Upstream DoT (`:853`) with TLS SNI hostname (`DOH_UPSTREAM_DOT_SNI`) |
 | `config.disableKeepalive` | `bool` | `false` | Disable HTTP keepalive (`DOH_DISABLE_KEEPALIVE`) |
 | `config.disablePost` | `bool` | `false` | Disable standard DoH `POST` queries (`DOH_DISABLE_POST`) |
 | `config.allowOdohPost` | `bool` | `false` | Allow ODoH `POST` when `disablePost=true` (`DOH_ALLOW_ODOH_POST`) |
@@ -100,7 +105,11 @@ helm upgrade --install daviante-doh ./charts/daviante-doh \
 | `config.ecsPrefixV4` | `int` | `24` | ECS IPv4 prefix length (`DOH_ECS_PREFIX_V4`) |
 | `config.ecsPrefixV6` | `int` | `56` | ECS IPv6 prefix length (`DOH_ECS_PREFIX_V6`) |
 | `config.odohRotationSecs` | `int` | `86400` | ODoH HPKE key rotation interval in seconds (`DOH_ODOH_ROTATION_SECS`) |
+| `config.allowlistFile` | `string` | `""` | Custom path to domain allowlist file (`DOH_ALLOWLIST_FILE`) |
+| `config.blocklistFile` | `string` | `""` | Custom path to domain blocklist file (`DOH_BLOCKLIST_FILE`) |
+| `config.hostsFile` | `string` | `""` | Custom path to split-horizon `/etc/hosts` file (`DOH_HOSTS_FILE`) |
 | `config.blockAction` | `string` | `"nxdomain"` | Policy block action: `nxdomain`, `refused`, or `zero-ip` (`DOH_BLOCK_ACTION`) |
+| `config.blockPrivateRebinding` | `bool` | `false` | Block public domains resolving to private/loopback IPs (`DOH_BLOCK_PRIVATE_REBINDING`) |
 | `config.rateLimitRps` | `int` | `0` | Per-IP token-bucket rate limit in req/s (`0` = disabled) (`DOH_RATE_LIMIT_RPS`) |
 | `config.rateLimitBurst` | `int` | `20` | Per-IP token-bucket burst size (`DOH_RATE_LIMIT_BURST`) |
 | `config.rateLimitV6Prefix` | `int` | `64` | IPv6 subnet aggregation prefix for rate limiting (`DOH_RATE_LIMIT_V6_PREFIX`) |
@@ -112,6 +121,7 @@ helm upgrade --install daviante-doh ./charts/daviante-doh \
 | `config.tlsMinVersion` | `string` | `"1.2"` | Minimum TLS version (`"1.2"` or `"1.3"`) (`DOH_TLS_MIN_VERSION`) |
 | `policy.allowlist` | `list` | `[]` | Inline domain allowlist entries mounted via `ConfigMap` |
 | `policy.blocklist` | `list` | `[]` | Inline domain blocklist entries mounted via `ConfigMap` |
+| `policy.hosts` | `list` | `[]` | Inline `/etc/hosts` split-horizon entries mounted via `ConfigMap` |
 | `tls.enabled` | `bool` | `false` | Enable built-in HTTPS using a Kubernetes TLS `Secret` |
 | `tls.secretName` | `string` | `""` | Name of the Kubernetes TLS `Secret` containing `tls.crt` and `tls.key` |
 | `service.type` | `string` | `"ClusterIP"` | Kubernetes `Service` type (`ClusterIP`, `NodePort`, `LoadBalancer`) |

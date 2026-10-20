@@ -44,6 +44,13 @@ $printCfgOut = (& $Engine run --rm `
     -e DOH_PUBLIC_PORT="" `
     -e DOH_ALLOWLIST_FILE="" `
     -e DOH_BLOCKLIST_FILE="" `
+    -e DOH_HOSTS_FILE="" `
+    -e DOH_UPSTREAM_DOT_SNI="dns.quad9.net" `
+    -e DOH_UPSTREAM_STRATEGY="parallel" `
+    -e DOH_SERVE_STALE_TTL="86400" `
+    -e DOH_CACHE_PREFETCH="yes" `
+    -e DOH_BLOCK_PRIVATE_REBINDING="on" `
+    -e DOH_DISABLE_COALESCING="0" `
     -e DOH_TRUSTED_PROXIES="10.0.0.0/8,192.168.0.0/16" `
     -e DOH_ENABLE_METRICS="1" `
     -e DOH_DISABLE_ANY="yes" `
@@ -57,6 +64,11 @@ $expectedFlags = @(
     "--listen-address 0.0.0.0:8080",
     "--admin-listen-address 0.0.0.0:9090",
     "--server-address 1.1.1.1:53,9.9.9.9:53",
+    "--upstream-strategy parallel",
+    "--upstream-dot-sni dns.quad9.net",
+    "--serve-stale-ttl 86400",
+    "--cache-prefetch",
+    "--block-private-rebinding",
     "--trusted-proxies 10.0.0.0/8,192.168.0.0/16",
     "--enable-metrics",
     "--disable-any",
@@ -67,7 +79,7 @@ foreach ($flag in $expectedFlags) {
         throw "Missing expected flag '$flag' in --print-config output: $printCfgOut"
     }
 }
-foreach ($forbidden in @("--disable-post", "--log-queries", "--disable-keepalive", "--public-port")) {
+foreach ($forbidden in @("--disable-post", "--log-queries", "--disable-keepalive", "--disable-coalescing", "--public-port", "--hosts-file")) {
     if ($printCfgOut -match [regex]::Escape($forbidden)) {
         throw "Unexpected flag '$forbidden' in --print-config output: $printCfgOut"
     }
@@ -190,6 +202,12 @@ try {
         [string]$metricsResp.Content
     }
     if ($metricsText -notmatch "daviante_doh_cache_hits_total 1" -or
+        $metricsText -notmatch "daviante_doh_cache_stale_hits_total" -or
+        $metricsText -notmatch "daviante_doh_cache_prefetch_total" -or
+        $metricsText -notmatch "daviante_doh_coalesced_queries_total" -or
+        $metricsText -notmatch "daviante_doh_rebinding_blocked_total" -or
+        $metricsText -notmatch "daviante_doh_hosts_hits_total" -or
+        $metricsText -notmatch 'daviante_doh_upstream_queries_total\{transport="dot"\}' -or
         $metricsText -notmatch "daviante_doh_request_duration_seconds_bucket" -or
         $metricsText -notmatch 'daviante_doh_responses_by_rcode_total\{rcode="NOERROR"\}') {
         throw "Expected Prometheus metrics missing in /metrics output: $metricsText"

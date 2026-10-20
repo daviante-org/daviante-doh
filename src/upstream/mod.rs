@@ -1,18 +1,22 @@
 //! Clean-room upstream DNS resolver client with Circuit-Breaker Failover (`UpstreamSet`),
-//! RFC 5452 §9.1 spoof-resistant UDP verification, DNS Flag Day 2020 `1232`-byte EDNS0 UDP size,
-//! and RFC 7766 §6.2.1 persistent TCP connection pooling.
+//! Load-Balancing Strategies (`failover`, `round-robin`, `parallel`), Singleflight In-Flight
+//! Query Coalescing, Upstream DNS-over-TLS (`DoT`, RFC 7858), RFC 5452 §9.1 spoof-resistant
+//! UDP verification, DNS Flag Day 2020 `1232`-byte EDNS0 UDP size, and RFC 7766 §6.2.1
+//! persistent TCP connection pooling.
 
 use std::collections::{HashMap, VecDeque};
 use std::net::{IpAddr, SocketAddr};
-use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant as StdInstant};
 
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::{TcpSocket, TcpStream, UdpSocket};
-use tokio::sync::Semaphore;
+use tokio::sync::{watch, Semaphore};
+use tokio::task::JoinSet;
 use tokio::time::Instant;
 
+use crate::cache::CacheKey;
 use crate::dns::ecs::attach_ecs_to_query;
 use crate::dns::wire::{
     compute_response_ttl_with_floor, ensure_edns0_max_payload, finalize_wire_response_for_client,
@@ -31,6 +35,39 @@ pub const MAX_IDLE_TCP_PER_UPSTREAM: usize = 8;
 /// Maximum idle lifetime of a pooled upstream TCP connection.
 const TCP_POOL_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// Upstream resolver selection and load-balancing strategy (`--upstream-strategy` / `DOH_UPSTREAM_STRATEGY`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum UpstreamStrategy {
+    /// Query healthy upstreams in configured priority order with circuit-breaker failover (default).
+    #[default]
+    Failover,
+    /// Distribute queries evenly across healthy upstreams in round-robin rotation.
+    RoundRobin,
+    /// Race healthy upstreams concurrently and return the fastest valid response.
+    Parallel,
+}
+
+impl UpstreamStrategy {
+    pub fn from_str_name(s: &str) -> Result<Self, DohError> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "failover" | "sequential" | "default" => Ok(Self::Failover),
+            "round-robin" | "round_robin" | "roundrobin" | "rr" => Ok(Self::RoundRobin),
+            "parallel" | "fastest" | "race" => Ok(Self::Parallel),
+            other => Err(DohError::InvalidConfig(format!(
+                "invalid upstream strategy '{other}' (expected failover, round-robin, or parallel)"
+            ))),
+        }
+    }
+
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Failover => "failover",
+            Self::RoundRobin => "round-robin",
+            Self::Parallel => "parallel",
+        }
+    }
+}
+
 /// Result of an upstream DNS exchange, containing both client-finalized and unpadded wire bytes and caching metadata.
 #[derive(Debug, Clone)]
 pub struct ResolvedDnsPacket {
@@ -47,6 +84,16 @@ pub struct ResolvedDnsPacket {
     pub cacheable: bool,
 }
 
+#[derive(Debug, Clone)]
+enum CoalescedOutcome {
+    Ok(ResolvedDnsPacket),
+    Timeout,
+    NetworkError(String),
+}
+
+type InflightReceiver = watch::Receiver<Option<CoalescedOutcome>>;
+type InflightMap = HashMap<CacheKey, InflightReceiver>;
+
 #[derive(Debug, Default)]
 struct UpstreamCircuit {
     consecutive_failures: AtomicU32,
@@ -55,13 +102,26 @@ struct UpstreamCircuit {
 
 type TcpPoolMap = HashMap<SocketAddr, VecDeque<(TcpStream, StdInstant)>>;
 
-/// Manages per-upstream circuit-breaker health state and a persistent RFC 7766 §6.2.1 TCP connection pool.
-#[derive(Clone, Debug)]
+/// Manages per-upstream circuit-breaker health state, load-balancing state, Singleflight
+/// in-flight query coalescing, and a persistent RFC 7766 §6.2.1 TCP connection pool.
+#[derive(Clone)]
 pub struct UpstreamSet {
     epoch: StdInstant,
     cooldown_ms: u64,
+    rr_counter: Arc<AtomicUsize>,
     circuits: Arc<Mutex<HashMap<SocketAddr, Arc<UpstreamCircuit>>>>,
     tcp_pool: Arc<Mutex<TcpPoolMap>>,
+    inflight: Arc<Mutex<InflightMap>>,
+    #[cfg(feature = "tls")]
+    dot_connector: Arc<Mutex<Option<tokio_rustls::TlsConnector>>>,
+}
+
+impl std::fmt::Debug for UpstreamSet {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("UpstreamSet")
+            .field("cooldown_ms", &self.cooldown_ms)
+            .finish()
+    }
 }
 
 impl Default for UpstreamSet {
@@ -70,13 +130,45 @@ impl Default for UpstreamSet {
     }
 }
 
+struct InflightLeaderGuard {
+    key: CacheKey,
+    inflight: Arc<Mutex<InflightMap>>,
+    tx: Option<watch::Sender<Option<CoalescedOutcome>>>,
+}
+
+impl InflightLeaderGuard {
+    fn complete(mut self, outcome: CoalescedOutcome) {
+        if let Ok(mut map) = self.inflight.lock() {
+            map.remove(&self.key);
+        }
+        if let Some(tx) = self.tx.take() {
+            let _ = tx.send(Some(outcome));
+        }
+    }
+}
+
+impl Drop for InflightLeaderGuard {
+    fn drop(&mut self) {
+        if let Some(tx) = self.tx.take() {
+            if let Ok(mut map) = self.inflight.lock() {
+                map.remove(&self.key);
+            }
+            let _ = tx.send(Some(CoalescedOutcome::Timeout));
+        }
+    }
+}
+
 impl UpstreamSet {
     pub fn new(cooldown: Duration) -> Self {
         Self {
             epoch: StdInstant::now(),
             cooldown_ms: cooldown.as_millis().min(u64::MAX as u128) as u64,
+            rr_counter: Arc::new(AtomicUsize::new(0)),
             circuits: Arc::new(Mutex::new(HashMap::new())),
             tcp_pool: Arc::new(Mutex::new(HashMap::new())),
+            inflight: Arc::new(Mutex::new(HashMap::new())),
+            #[cfg(feature = "tls")]
+            dot_connector: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -124,6 +216,16 @@ impl UpstreamSet {
 
     /// Partitions `upstreams` so healthy resolvers are tried first, followed by circuit-open resolvers as fallback.
     pub fn prioritized_upstreams(&self, upstreams: &[SocketAddr]) -> Vec<SocketAddr> {
+        self.select_upstreams(upstreams, UpstreamStrategy::Failover)
+    }
+
+    /// Selects and orders `upstreams` according to `strategy` (`Failover`, `RoundRobin`, or `Parallel`),
+    /// always keeping healthy resolvers ahead of circuit-open fallback resolvers.
+    pub fn select_upstreams(
+        &self,
+        upstreams: &[SocketAddr],
+        strategy: UpstreamStrategy,
+    ) -> Vec<SocketAddr> {
         let now = self.now_ms();
         let mut healthy = Vec::with_capacity(upstreams.len());
         let mut open = Vec::new();
@@ -134,6 +236,10 @@ impl UpstreamSet {
             } else {
                 open.push(addr);
             }
+        }
+        if strategy == UpstreamStrategy::RoundRobin && healthy.len() > 1 {
+            let rot = self.rr_counter.fetch_add(1, Ordering::Relaxed) % healthy.len();
+            healthy.rotate_left(rot);
         }
         healthy.extend(open);
         healthy
@@ -161,6 +267,23 @@ impl UpstreamSet {
             queue.push_back((stream, StdInstant::now()));
         }
     }
+
+    #[cfg(feature = "tls")]
+    fn get_or_init_dot_connector(
+        &self,
+        extra_ca: Option<&std::path::Path>,
+    ) -> Result<tokio_rustls::TlsConnector, DohError> {
+        let mut guard = self
+            .dot_connector
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(ref conn) = *guard {
+            return Ok(conn.clone());
+        }
+        let conn = crate::tls::build_upstream_dot_connector(extra_ca)?;
+        *guard = Some(conn.clone());
+        Ok(conn)
+    }
 }
 
 /// Stateless wrapper around `resolve_upstream_with_set` using a default `UpstreamSet`.
@@ -185,8 +308,114 @@ pub async fn resolve_upstream(
     .await
 }
 
+/// Executes an upstream DNS lookup with Singleflight In-Flight Query Coalescing when `coalesce_key` is `Some`.
+/// Concurrent identical cache-miss queries share a single upstream resolution and restore each client's
+/// individual `TXID`, Question `0x20` casing, and EDNS0 padding on completion.
+#[allow(clippy::too_many_arguments)]
+pub async fn resolve_upstream_coalesced(
+    query: Vec<u8>,
+    coalesce_key: Option<&CacheKey>,
+    client_ip: Option<IpAddr>,
+    config: &DohConfig,
+    upstream_set: &UpstreamSet,
+    tcp_limiter: &Arc<Semaphore>,
+    metrics: &DohMetrics,
+    deadline: Instant,
+) -> Result<ResolvedDnsPacket, DohError> {
+    let Some(key) = coalesce_key else {
+        return resolve_upstream_with_set(
+            query,
+            client_ip,
+            config,
+            upstream_set,
+            tcp_limiter,
+            metrics,
+            deadline,
+        )
+        .await;
+    };
+
+    let parsed = validate_and_parse_query(&query)?;
+    enum Role {
+        Leader(InflightLeaderGuard),
+        Follower(InflightReceiver),
+    }
+
+    let role = {
+        let mut map = upstream_set
+            .inflight
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(rx) = map.get(key) {
+            Role::Follower(rx.clone())
+        } else {
+            let (tx, rx) = watch::channel(None);
+            map.insert(key.clone(), rx);
+            Role::Leader(InflightLeaderGuard {
+                key: key.clone(),
+                inflight: Arc::clone(&upstream_set.inflight),
+                tx: Some(tx),
+            })
+        }
+    };
+
+    match role {
+        Role::Leader(guard) => {
+            let res = resolve_upstream_with_set(
+                query,
+                client_ip,
+                config,
+                upstream_set,
+                tcp_limiter,
+                metrics,
+                deadline,
+            )
+            .await;
+            match &res {
+                Ok(pkt) => guard.complete(CoalescedOutcome::Ok(pkt.clone())),
+                Err(DohError::UpstreamTimeout) => guard.complete(CoalescedOutcome::Timeout),
+                Err(e) => guard.complete(CoalescedOutcome::NetworkError(e.to_string())),
+            }
+            res
+        }
+        Role::Follower(mut rx) => {
+            metrics.inc_coalesced_query();
+            let wait_fut = async {
+                loop {
+                    if let Some(outcome) = rx.borrow_and_update().clone() {
+                        return Ok(outcome);
+                    }
+                    if rx.changed().await.is_err() {
+                        return Err(DohError::UpstreamTimeout);
+                    }
+                }
+            };
+            let outcome = tokio::time::timeout_at(deadline, wait_fut)
+                .await
+                .map_err(|_| DohError::UpstreamTimeout)??;
+
+            match outcome {
+                CoalescedOutcome::Ok(mut pkt) => {
+                    let mut waiter_buf = pkt.unpadded_wire_bytes;
+                    rewrite_question_from_client(
+                        &mut waiter_buf,
+                        &query,
+                        parsed.question_end_offset,
+                    );
+                    pkt.unpadded_wire_bytes = waiter_buf.clone();
+                    finalize_wire_response_for_client(&mut waiter_buf, parsed.has_edns0);
+                    pkt.wire_bytes = waiter_buf;
+                    Ok(pkt)
+                }
+                CoalescedOutcome::Timeout => Err(DohError::UpstreamTimeout),
+                CoalescedOutcome::NetworkError(msg) => Err(DohError::UpstreamError(msg)),
+            }
+        }
+    }
+}
+
 /// Executes an upstream DNS lookup across configured upstream resolvers using `upstream_set`
-/// for circuit-breaker failover and persistent TCP connection pooling.
+/// for circuit-breaker failover, load balancing, and persistent TCP connection pooling.
 pub async fn resolve_upstream_with_set(
     mut query: Vec<u8>,
     client_ip: Option<IpAddr>,
@@ -247,58 +476,85 @@ async fn resolve_upstream_inner(
     }
 
     let configured_upstreams = config.effective_upstreams();
-    let upstreams = upstream_set.prioritized_upstreams(&configured_upstreams);
+    let upstreams = upstream_set.select_upstreams(&configured_upstreams, config.upstream_strategy);
     let total_upstreams = upstreams.len().max(1);
     let now = Instant::now();
     let remaining_budget = deadline.saturating_duration_since(now);
     let per_try_timeout =
         (remaining_budget / (total_upstreams as u32)).max(Duration::from_millis(250));
 
-    let mut last_err = DohError::UpstreamTimeout;
-    let mut response_buf = Vec::new();
+    let response_buf =
+        if config.upstream_strategy == UpstreamStrategy::Parallel && upstreams.len() > 1 {
+            query_upstreams_parallel(
+                query,
+                upstream_txid,
+                &parsed.qname,
+                parsed.qtype,
+                parsed.qclass,
+                &upstreams,
+                config,
+                upstream_set,
+                tcp_limiter,
+                metrics,
+            )
+            .await?
+        } else {
+            let mut last_err = DohError::UpstreamTimeout;
+            let mut buf_out = Vec::new();
+            for (idx, &upstream_addr) in upstreams.iter().enumerate() {
+                let try_fut = query_single_upstream(
+                    query,
+                    upstream_txid,
+                    &parsed.qname,
+                    parsed.qtype,
+                    parsed.qclass,
+                    upstream_addr,
+                    config,
+                    upstream_set,
+                    tcp_limiter,
+                    metrics,
+                );
+                let result = if idx + 1 < total_upstreams {
+                    match tokio::time::timeout(per_try_timeout, try_fut).await {
+                        Ok(r) => r,
+                        Err(_) => {
+                            let transport = if config
+                                .upstream_dot_sni
+                                .as_deref()
+                                .is_some_and(|s| !s.trim().is_empty())
+                            {
+                                "dot"
+                            } else {
+                                "udp"
+                            };
+                            metrics.record_upstream_target(upstream_addr, transport, "timeout");
+                            Err(DohError::UpstreamTimeout)
+                        }
+                    }
+                } else {
+                    try_fut.await
+                };
 
-    for (idx, &upstream_addr) in upstreams.iter().enumerate() {
-        let try_fut = query_single_upstream(
-            query,
-            upstream_txid,
-            &parsed.qname,
-            parsed.qtype,
-            parsed.qclass,
-            upstream_addr,
-            config.local_bind_address,
-            upstream_set,
-            tcp_limiter,
-            metrics,
-        );
-        let result = if idx + 1 < total_upstreams {
-            match tokio::time::timeout(per_try_timeout, try_fut).await {
-                Ok(r) => r,
-                Err(_) => {
-                    metrics.record_upstream_target(upstream_addr, "udp", "timeout");
-                    Err(DohError::UpstreamTimeout)
+                match result {
+                    Ok(buf) => {
+                        upstream_set.record_success(upstream_addr);
+                        buf_out = buf;
+                        break;
+                    }
+                    Err(e) => {
+                        upstream_set.record_failure(upstream_addr);
+                        metrics.inc_upstream_failure();
+                        last_err = e;
+                    }
                 }
             }
-        } else {
-            try_fut.await
+            if buf_out.is_empty() {
+                return Err(last_err);
+            }
+            buf_out
         };
 
-        match result {
-            Ok(buf) => {
-                upstream_set.record_success(upstream_addr);
-                response_buf = buf;
-                break;
-            }
-            Err(e) => {
-                upstream_set.record_failure(upstream_addr);
-                metrics.inc_upstream_failure();
-                last_err = e;
-            }
-        }
-    }
-
-    if response_buf.is_empty() {
-        return Err(last_err);
-    }
+    let mut response_buf = response_buf;
 
     // Restore client's original DNS ID and exact Question section casing (RFC 8484 §4.1, L-7)
     rewrite_question_from_client(
@@ -337,6 +593,65 @@ async fn resolve_upstream_inner(
 }
 
 #[allow(clippy::too_many_arguments)]
+async fn query_upstreams_parallel(
+    query: &[u8],
+    upstream_txid: [u8; 2],
+    expected_qname_lower: &str,
+    expected_qtype: u16,
+    expected_qclass: u16,
+    upstreams: &[SocketAddr],
+    config: &DohConfig,
+    upstream_set: &UpstreamSet,
+    tcp_limiter: &Arc<Semaphore>,
+    metrics: &DohMetrics,
+) -> Result<Vec<u8>, DohError> {
+    let mut set = JoinSet::new();
+    for &upstream_addr in upstreams {
+        let q_bytes = query.to_vec();
+        let qname = expected_qname_lower.to_string();
+        let cfg = config.clone();
+        let u_set = upstream_set.clone();
+        let limiter = Arc::clone(tcp_limiter);
+        let m = metrics.clone();
+        set.spawn(async move {
+            let res = query_single_upstream(
+                &q_bytes,
+                upstream_txid,
+                &qname,
+                expected_qtype,
+                expected_qclass,
+                upstream_addr,
+                &cfg,
+                &u_set,
+                &limiter,
+                &m,
+            )
+            .await;
+            (upstream_addr, res)
+        });
+    }
+
+    let mut last_err = DohError::UpstreamTimeout;
+    while let Some(join_res) = set.join_next().await {
+        if let Ok((addr, res)) = join_res {
+            match res {
+                Ok(buf) => {
+                    upstream_set.record_success(addr);
+                    // Dropping `set` automatically aborts remaining slower upstream tasks
+                    return Ok(buf);
+                }
+                Err(e) => {
+                    upstream_set.record_failure(addr);
+                    metrics.inc_upstream_failure();
+                    last_err = e;
+                }
+            }
+        }
+    }
+    Err(last_err)
+}
+
+#[allow(clippy::too_many_arguments)]
 async fn query_single_upstream(
     query: &[u8],
     upstream_txid: [u8; 2],
@@ -344,11 +659,33 @@ async fn query_single_upstream(
     expected_qtype: u16,
     expected_qclass: u16,
     upstream_addr: SocketAddr,
-    local_bind: SocketAddr,
+    config: &DohConfig,
     upstream_set: &UpstreamSet,
     tcp_limiter: &Arc<Semaphore>,
     metrics: &DohMetrics,
 ) -> Result<Vec<u8>, DohError> {
+    if let Some(sni) = config
+        .upstream_dot_sni
+        .as_ref()
+        .filter(|s| !s.trim().is_empty())
+    {
+        return query_upstream_dot(
+            query,
+            upstream_txid,
+            expected_qname_lower,
+            expected_qtype,
+            expected_qclass,
+            upstream_addr,
+            sni.trim(),
+            config,
+            upstream_set,
+            tcp_limiter,
+            metrics,
+        )
+        .await;
+    }
+
+    let local_bind = config.local_bind_address;
     let bind_addr = if local_bind.ip().is_unspecified() {
         DohConfig::default_local_bind_for(upstream_addr)
     } else {
@@ -435,6 +772,85 @@ async fn query_single_upstream(
     Ok(response_buf)
 }
 
+#[allow(clippy::too_many_arguments)]
+async fn query_upstream_dot(
+    query: &[u8],
+    upstream_txid: [u8; 2],
+    expected_qname_lower: &str,
+    expected_qtype: u16,
+    expected_qclass: u16,
+    upstream_addr: SocketAddr,
+    sni: &str,
+    config: &DohConfig,
+    upstream_set: &UpstreamSet,
+    tcp_limiter: &Arc<Semaphore>,
+    metrics: &DohMetrics,
+) -> Result<Vec<u8>, DohError> {
+    #[cfg(feature = "tls")]
+    {
+        metrics.inc_upstream_dot();
+        let _permit = tcp_limiter
+            .acquire()
+            .await
+            .map_err(|_| DohError::UpstreamError("DoT concurrency semaphore closed".into()))?;
+
+        let do_dot = async {
+            let connector =
+                upstream_set.get_or_init_dot_connector(config.tls_cert_path.as_deref())?;
+            let server_name =
+                tokio_rustls::rustls::pki_types::ServerName::try_from(sni.to_string()).map_err(
+                    |e| DohError::InvalidConfig(format!("invalid upstream DoT SNI '{sni}': {e}")),
+                )?;
+            let tcp_sock = match upstream_addr {
+                SocketAddr::V4(_) => TcpSocket::new_v4()?,
+                SocketAddr::V6(_) => TcpSocket::new_v6()?,
+            };
+            let stream = tcp_sock.connect(upstream_addr).await?;
+            stream.set_nodelay(true)?;
+            let mut tls_stream = connector.connect(server_name, stream).await?;
+            exchange_dns_over_stream(
+                &mut tls_stream,
+                query,
+                upstream_txid,
+                expected_qname_lower,
+                expected_qtype,
+                expected_qclass,
+            )
+            .await
+        };
+
+        match do_dot.await {
+            Ok(buf) => {
+                metrics.record_upstream_target(upstream_addr, "dot", "ok");
+                Ok(buf)
+            }
+            Err(e) => {
+                metrics.record_upstream_target(upstream_addr, "dot", "error");
+                Err(e)
+            }
+        }
+    }
+    #[cfg(not(feature = "tls"))]
+    {
+        let _ = (
+            query,
+            upstream_txid,
+            expected_qname_lower,
+            expected_qtype,
+            expected_qclass,
+            upstream_addr,
+            sni,
+            config,
+            upstream_set,
+            tcp_limiter,
+            metrics,
+        );
+        Err(DohError::InvalidConfig(
+            "upstream DoT requires the 'tls' crate feature".into(),
+        ))
+    }
+}
+
 #[doc(hidden)]
 pub async fn query_upstream_tcp(
     query: &[u8],
@@ -492,6 +908,28 @@ pub async fn exchange_dns_over_tcp_stream(
     expected_qtype: u16,
     expected_qclass: u16,
 ) -> Result<Vec<u8>, DohError> {
+    exchange_dns_over_stream(
+        stream,
+        query,
+        upstream_txid,
+        expected_qname_lower,
+        expected_qtype,
+        expected_qclass,
+    )
+    .await
+}
+
+async fn exchange_dns_over_stream<S>(
+    stream: &mut S,
+    query: &[u8],
+    upstream_txid: [u8; 2],
+    expected_qname_lower: &str,
+    expected_qtype: u16,
+    expected_qclass: u16,
+) -> Result<Vec<u8>, DohError>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
     let qlen_bytes = (query.len() as u16).to_be_bytes();
     stream.write_all(&qlen_bytes).await?;
     stream.write_all(query).await?;

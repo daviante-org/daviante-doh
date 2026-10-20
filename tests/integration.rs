@@ -1833,3 +1833,467 @@ async fn tcp_fallback_when_udp_truncated() {
     assert!(!wire::is_truncated(&res.wire_bytes));
     assert!(read_u32_be(&res.unpadded_wire_bytes, 29 + 6).is_ok());
 }
+
+// =============================================================================
+// v0.2.0 Competitive Enhancements: Serve-Stale (RFC 8767), Prefetch, Singleflight,
+// Load-Balancing (Round-Robin & Parallel), Upstream DoT (RFC 7858), Rebinding & Hosts
+// =============================================================================
+pub mod competitive_enhancements {
+    use super::*;
+    use daviante_doh::UpstreamStrategy;
+
+    #[tokio::test]
+    async fn rfc8767_serve_stale_and_prefetch_on_upstream_outage() {
+        let udp = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let upstream_addr = udp.local_addr().unwrap();
+        let respond_enabled = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let respond_flag = Arc::clone(&respond_enabled);
+
+        tokio::spawn(async move {
+            let mut buf = [0u8; 4096];
+            while let Ok((len, peer)) = udp.recv_from(&mut buf).await {
+                if respond_flag.load(Ordering::Acquire) {
+                    let resp = build_mock_dns_answer_with_ttl(&buf[..len], 1);
+                    let _ = udp.send_to(&resp, peer).await;
+                }
+            }
+        });
+
+        let cfg = DohConfig {
+            local_bind_address: "127.0.0.1:0".parse().unwrap(),
+            server_address: upstream_addr,
+            cache_size: 1024,
+            serve_stale_ttl: 3600,
+            cache_prefetch: true,
+            timeout: Duration::from_secs(1),
+            ..DohConfig::default()
+        };
+        let odoh_keys =
+            OdohKeyManager::spawn(tokio::runtime::Handle::current(), Duration::from_secs(3600))
+                .unwrap();
+        let engine = DohEngine::new(cfg, odoh_keys).unwrap();
+
+        let q = build_sample_query(b"\x05stale\x07example\x03com\x00", 1, true);
+
+        // 1. Initial query populates cache with 1-second TTL
+        let r1 = engine
+            .process_dns_query(
+                q.clone(),
+                None,
+                tokio::time::Instant::now() + Duration::from_secs(2),
+            )
+            .await
+            .unwrap();
+        assert_eq!(wire::rcode(&r1.unpadded_wire_bytes), 0);
+
+        // 2. Wait 1.15s so the 1-second TTL expires, then disable upstream to simulate total outage
+        tokio::time::sleep(Duration::from_millis(1150)).await;
+        respond_enabled.store(false, Ordering::Release);
+
+        // 3. Query again during upstream outage -> RFC 8767 Serve-Stale returns NOERROR with TTL=30 and EDE 3!
+        let mut q2 = q.clone();
+        q2[0] = 0x99;
+        q2[1] = 0x88;
+        let r2 = engine
+            .process_dns_query(
+                q2,
+                None,
+                tokio::time::Instant::now() + Duration::from_secs(2),
+            )
+            .await
+            .unwrap();
+        assert_eq!(&r2.wire_bytes[0..2], &[0x99, 0x88]);
+        assert_eq!(wire::rcode(&r2.unpadded_wire_bytes), 0);
+        assert_eq!(r2.cache_ttl, 30);
+
+        let decoded_json = decode_wire_to_json(&r2.unpadded_wire_bytes).unwrap();
+        assert_eq!(decoded_json.status, 0);
+        assert_eq!(decoded_json.answer.as_ref().unwrap()[0].ttl, 30);
+        assert!(decoded_json
+            .comment
+            .as_deref()
+            .unwrap_or("")
+            .contains("Stale Answer"));
+
+        let prom = engine.metrics.render_prometheus();
+        assert!(prom.contains("daviante_doh_cache_stale_hits_total 1"));
+    }
+
+    #[tokio::test]
+    async fn singleflight_coalesces_concurrent_identical_cache_misses() {
+        let udp = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let upstream_addr = udp.local_addr().unwrap();
+        let upstream_hits = Arc::new(AtomicUsize::new(0));
+        let hits_clone = Arc::clone(&upstream_hits);
+
+        tokio::spawn(async move {
+            let mut buf = [0u8; 4096];
+            while let Ok((len, peer)) = udp.recv_from(&mut buf).await {
+                hits_clone.fetch_add(1, Ordering::Relaxed);
+                let pkt = buf[..len].to_vec();
+                let u_sock = udp.local_addr().unwrap();
+                let _ = u_sock;
+                tokio::time::sleep(Duration::from_millis(120)).await;
+                let resp = build_mock_dns_answer_with_ttl(&pkt, 300);
+                let _ = udp.send_to(&resp, peer).await;
+            }
+        });
+
+        let cfg = DohConfig {
+            local_bind_address: "127.0.0.1:0".parse().unwrap(),
+            server_address: upstream_addr,
+            cache_size: 1024,
+            coalesce_queries: true,
+            ..DohConfig::default()
+        };
+        let odoh_keys =
+            OdohKeyManager::spawn(tokio::runtime::Handle::current(), Duration::from_secs(3600))
+                .unwrap();
+        let engine = DohEngine::new(cfg, odoh_keys).unwrap();
+
+        let mut tasks = Vec::new();
+        for i in 0..8u8 {
+            let eng = engine.clone();
+            tasks.push(tokio::spawn(async move {
+                let name_wire: &[u8] = if i % 2 == 0 {
+                    b"\x08CoAlEsCe\x07ExAmPlE\x03cOm\x00"
+                } else {
+                    b"\x08coalesce\x07example\x03com\x00"
+                };
+                let mut q = build_sample_query(name_wire, 1, i % 2 == 0);
+                q[0] = 0x42;
+                q[1] = i;
+                let res = eng
+                    .process_dns_query(
+                        q.clone(),
+                        None,
+                        tokio::time::Instant::now() + Duration::from_secs(3),
+                    )
+                    .await
+                    .unwrap();
+                (i, q, res)
+            }));
+        }
+
+        for t in tasks {
+            let (i, orig_q, res) = t.await.unwrap();
+            assert_eq!(&res.wire_bytes[0..2], &[0x42, i]);
+            // Verify 0x20 question section casing matches each individual client's query
+            assert_eq!(&res.wire_bytes[12..29], &orig_q[12..29]);
+            if i % 2 == 0 {
+                assert_eq!(res.wire_bytes.len() % RESPONSE_PADDING_BLOCK_SIZE, 0);
+            }
+        }
+
+        assert_eq!(
+            upstream_hits.load(Ordering::Relaxed),
+            1,
+            "expected all 8 concurrent identical queries to coalesce into 1 upstream lookup"
+        );
+        let prom = engine.metrics.render_prometheus();
+        assert!(prom.contains("daviante_doh_coalesced_queries_total 7"));
+    }
+
+    #[tokio::test]
+    async fn upstream_round_robin_and_parallel_strategies() {
+        assert_eq!(
+            UpstreamStrategy::from_str_name("round-robin").unwrap(),
+            UpstreamStrategy::RoundRobin
+        );
+        assert_eq!(
+            UpstreamStrategy::from_str_name("parallel").unwrap(),
+            UpstreamStrategy::Parallel
+        );
+        assert!(UpstreamStrategy::from_str_name("invalid").is_err());
+
+        // 1. Round-Robin across 2 healthy upstreams
+        let u1_hits = Arc::new(AtomicUsize::new(0));
+        let u2_hits = Arc::new(AtomicUsize::new(0));
+        let u1_sock = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let u2_sock = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let u1_addr = u1_sock.local_addr().unwrap();
+        let u2_addr = u2_sock.local_addr().unwrap();
+
+        let h1 = Arc::clone(&u1_hits);
+        tokio::spawn(async move {
+            let mut buf = [0u8; 4096];
+            while let Ok((len, peer)) = u1_sock.recv_from(&mut buf).await {
+                h1.fetch_add(1, Ordering::Relaxed);
+                let resp = build_mock_dns_answer_with_ttl(&buf[..len], 60);
+                let _ = u1_sock.send_to(&resp, peer).await;
+            }
+        });
+        let h2 = Arc::clone(&u2_hits);
+        tokio::spawn(async move {
+            let mut buf = [0u8; 4096];
+            while let Ok((len, peer)) = u2_sock.recv_from(&mut buf).await {
+                h2.fetch_add(1, Ordering::Relaxed);
+                let resp = build_mock_dns_answer_with_ttl(&buf[..len], 60);
+                let _ = u2_sock.send_to(&resp, peer).await;
+            }
+        });
+
+        let cfg_rr = DohConfig {
+            local_bind_address: "127.0.0.1:0".parse().unwrap(),
+            server_address: u1_addr,
+            upstream_addresses: vec![u1_addr, u2_addr],
+            upstream_strategy: UpstreamStrategy::RoundRobin,
+            ..DohConfig::default()
+        };
+        let odoh_keys =
+            OdohKeyManager::spawn(tokio::runtime::Handle::current(), Duration::from_secs(3600))
+                .unwrap();
+        let eng_rr = DohEngine::new(cfg_rr, odoh_keys.clone()).unwrap();
+        for i in 0..4u8 {
+            let mut q = build_sample_query(b"\x02rr\x07example\x03com\x00", 1, false);
+            q[1] = i;
+            let _ = eng_rr
+                .process_dns_query(
+                    q,
+                    None,
+                    tokio::time::Instant::now() + Duration::from_secs(2),
+                )
+                .await
+                .unwrap();
+        }
+        assert_eq!(u1_hits.load(Ordering::Relaxed), 2);
+        assert_eq!(u2_hits.load(Ordering::Relaxed), 2);
+
+        // 2. Parallel strategy: slow upstream (500ms) + fast upstream (10ms) -> completes in < 200ms
+        let slow_sock = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let slow_addr = slow_sock.local_addr().unwrap();
+        tokio::spawn(async move {
+            let mut buf = [0u8; 4096];
+            while let Ok((len, peer)) = slow_sock.recv_from(&mut buf).await {
+                let pkt = buf[..len].to_vec();
+                tokio::time::sleep(Duration::from_millis(500)).await;
+                let resp = build_mock_dns_answer_with_ttl(&pkt, 60);
+                let _ = slow_sock.send_to(&resp, peer).await;
+            }
+        });
+
+        let cfg_par = DohConfig {
+            local_bind_address: "127.0.0.1:0".parse().unwrap(),
+            server_address: slow_addr,
+            upstream_addresses: vec![slow_addr, u1_addr],
+            upstream_strategy: UpstreamStrategy::Parallel,
+            ..DohConfig::default()
+        };
+        let eng_par = DohEngine::new(cfg_par, odoh_keys).unwrap();
+        let started = tokio::time::Instant::now();
+        let q_par = build_sample_query(b"\x04fast\x07example\x03com\x00", 1, false);
+        let _ = eng_par
+            .process_dns_query(q_par, None, started + Duration::from_secs(2))
+            .await
+            .unwrap();
+        assert!(started.elapsed() < Duration::from_millis(250));
+    }
+
+    #[cfg(feature = "tls")]
+    #[tokio::test]
+    async fn upstream_dns_over_tls_rfc7858() {
+        let (cert_path, key_path) = crate::tls::write_temp_cert_and_key("upstream-dot");
+        let acceptor = daviante_doh::tls::build_tls_acceptor(&cert_path, &key_path).unwrap();
+        let dot_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let dot_addr = dot_listener.local_addr().unwrap();
+
+        tokio::spawn(async move {
+            while let Ok((stream, _)) = dot_listener.accept().await {
+                let acc = acceptor.clone();
+                tokio::spawn(async move {
+                    if let Ok(mut tls_stream) = acc.accept(stream).await {
+                        let mut len_buf = [0u8; 2];
+                        if tls_stream.read_exact(&mut len_buf).await.is_ok() {
+                            let qlen = u16::from_be_bytes(len_buf) as usize;
+                            let mut qbuf = vec![0u8; qlen];
+                            if tls_stream.read_exact(&mut qbuf).await.is_ok() {
+                                let resp = build_mock_dns_answer_with_ttl(&qbuf, 120);
+                                let rlen = (resp.len() as u16).to_be_bytes();
+                                let _ = tls_stream.write_all(&rlen).await;
+                                let _ = tls_stream.write_all(&resp).await;
+                                let _ = tls_stream.flush().await;
+                            }
+                        }
+                    }
+                });
+            }
+        });
+
+        let cfg = DohConfig {
+            local_bind_address: "127.0.0.1:0".parse().unwrap(),
+            server_address: dot_addr,
+            upstream_dot_sni: Some("localhost".into()),
+            tls_cert_path: Some(cert_path.clone()),
+            tls_cert_key_path: Some(key_path.clone()),
+            ..DohConfig::default()
+        };
+        let odoh_keys =
+            OdohKeyManager::spawn(tokio::runtime::Handle::current(), Duration::from_secs(3600))
+                .unwrap();
+        let engine = DohEngine::new(cfg, odoh_keys).unwrap();
+
+        let q = build_sample_query(b"\x03dot\x07example\x03com\x00", 1, false);
+        let res = engine
+            .process_dns_query(
+                q,
+                None,
+                tokio::time::Instant::now() + Duration::from_secs(3),
+            )
+            .await
+            .unwrap();
+        assert_eq!(wire::rcode(&res.unpadded_wire_bytes), 0);
+        let prom = engine.metrics.render_prometheus();
+        assert!(prom.contains(&format!(
+            "daviante_doh_upstream_queries_total{{upstream=\"{dot_addr}\",transport=\"dot\",result=\"ok\"}} 1"
+        )));
+
+        let _ = std::fs::remove_file(cert_path);
+        let _ = std::fs::remove_file(key_path);
+    }
+
+    #[tokio::test]
+    async fn rebinding_protection_split_horizon_hosts_and_hot_reload() {
+        // Upstream returns private RFC 1918 IP 192.168.1.50
+        let udp = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let upstream_addr = udp.local_addr().unwrap();
+        tokio::spawn(async move {
+            let mut buf = [0u8; 4096];
+            while let Ok((len, peer)) = udp.recv_from(&mut buf).await {
+                let q_end = wire::skip_questions(&buf[..len]).unwrap();
+                let mut resp = buf[..q_end].to_vec();
+                resp[2] = 0x81;
+                resp[3] = 0x80;
+                write_u16_be(&mut resp, 4, 1).unwrap();
+                write_u16_be(&mut resp, 6, 1).unwrap();
+                write_u16_be(&mut resp, 8, 0).unwrap();
+                write_u16_be(&mut resp, 10, 0).unwrap();
+                resp.extend_from_slice(
+                    b"\xc0\x0c\x00\x01\x00\x01\x00\x00\x00\x3c\x00\x04\xc0\xa8\x01\x32",
+                );
+                let _ = udp.send_to(&resp, peer).await;
+            }
+        });
+
+        let dir = std::env::temp_dir();
+        let pid = std::process::id();
+        let hosts_path = dir.join(format!("daviante-doh-hosts-{pid}.txt"));
+        let allow_path = dir.join(format!("daviante-doh-allow-{pid}.txt"));
+        let block_path = dir.join(format!("daviante-doh-block-{pid}.txt"));
+
+        std::fs::write(
+            &hosts_path,
+            "10.20.30.40 intranet.corp.local\nfd00::42 intranet.corp.local\n",
+        )
+        .unwrap();
+        std::fs::write(&allow_path, "allowed.internal.local\n").unwrap();
+        std::fs::write(&block_path, "initial-blocked.example.com\n").unwrap();
+
+        let cfg = DohConfig {
+            local_bind_address: "127.0.0.1:0".parse().unwrap(),
+            server_address: upstream_addr,
+            allowlist_file: Some(allow_path.clone()),
+            blocklist_file: Some(block_path.clone()),
+            hosts_file: Some(hosts_path.clone()),
+            block_private_rebinding: true,
+            ..DohConfig::default()
+        };
+        let odoh_keys =
+            OdohKeyManager::spawn(tokio::runtime::Handle::current(), Duration::from_secs(3600))
+                .unwrap();
+        let engine = DohEngine::new(cfg, odoh_keys).unwrap();
+
+        // 1. Split-Horizon Hosts File: A, AAAA, and reverse PTR queries resolved locally
+        let q_a = build_sample_query(b"\x08intranet\x04corp\x05local\x00", 1, false);
+        let r_a = engine
+            .process_dns_query(
+                q_a,
+                None,
+                tokio::time::Instant::now() + Duration::from_secs(2),
+            )
+            .await
+            .unwrap();
+        let j_a = decode_wire_to_json(&r_a.unpadded_wire_bytes).unwrap();
+        assert_eq!(j_a.answer.unwrap()[0].data, "10.20.30.40");
+
+        let q_aaaa = build_sample_query(b"\x08intranet\x04corp\x05local\x00", 28, false);
+        let r_aaaa = engine
+            .process_dns_query(
+                q_aaaa,
+                None,
+                tokio::time::Instant::now() + Duration::from_secs(2),
+            )
+            .await
+            .unwrap();
+        let j_aaaa = decode_wire_to_json(&r_aaaa.unpadded_wire_bytes).unwrap();
+        assert_eq!(j_aaaa.answer.unwrap()[0].data, "fd00::42");
+
+        let q_ptr = build_sample_query(
+            b"\x0240\x0230\x0220\x0210\x07in-addr\x04arpa\x00",
+            12,
+            false,
+        );
+        let r_ptr = engine
+            .process_dns_query(
+                q_ptr,
+                None,
+                tokio::time::Instant::now() + Duration::from_secs(2),
+            )
+            .await
+            .unwrap();
+        let j_ptr = decode_wire_to_json(&r_ptr.unpadded_wire_bytes).unwrap();
+        assert_eq!(j_ptr.answer.unwrap()[0].data, "intranet.corp.local");
+
+        // 2. DNS Rebinding Protection blocks public domain resolving to 192.168.1.50
+        let q_rebind = build_sample_query(b"\x06rebind\x07example\x03com\x00", 1, true);
+        let r_rebind = engine
+            .process_dns_query(
+                q_rebind,
+                None,
+                tokio::time::Instant::now() + Duration::from_secs(2),
+            )
+            .await
+            .unwrap();
+        assert_eq!(wire::rcode(&r_rebind.unpadded_wire_bytes), RCODE_NXDOMAIN);
+        let j_rebind = decode_wire_to_json(&r_rebind.unpadded_wire_bytes).unwrap();
+        assert!(j_rebind
+            .comment
+            .as_deref()
+            .unwrap_or("")
+            .contains("DNS Rebinding Protection"));
+
+        // 3. Allowlisted domain is permitted to resolve to 192.168.1.50
+        let q_allowed = build_sample_query(b"\x07allowed\x08internal\x05local\x00", 1, false);
+        let r_allowed = engine
+            .process_dns_query(
+                q_allowed,
+                None,
+                tokio::time::Instant::now() + Duration::from_secs(2),
+            )
+            .await
+            .unwrap();
+        assert_eq!(wire::rcode(&r_allowed.unpadded_wire_bytes), 0);
+
+        // 4. Lock-free Hot-Reload of blocklist & hosts file
+        std::fs::write(&block_path, "newly-blocked.example.com\n").unwrap();
+        engine
+            .policy
+            .reload_from_files(
+                Some(&allow_path),
+                Some(&block_path),
+                Some(&hosts_path),
+                BlockAction::Nxdomain,
+                true,
+            )
+            .unwrap();
+        assert!(!engine.policy.is_blocked("initial-blocked.example.com"));
+        assert!(engine.policy.is_blocked("newly-blocked.example.com"));
+
+        let prom = engine.metrics.render_prometheus();
+        assert!(prom.contains("daviante_doh_hosts_hits_total 3"));
+        assert!(prom.contains("daviante_doh_rebinding_blocked_total 1"));
+
+        let _ = std::fs::remove_file(hosts_path);
+        let _ = std::fs::remove_file(allow_path);
+        let _ = std::fs::remove_file(block_path);
+    }
+}

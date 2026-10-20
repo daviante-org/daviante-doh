@@ -1,4 +1,5 @@
-//! Clean-room Enterprise Protective DNS Domain Policy Engine (Allowlist / Blocklist + CNAME chain + RFC 8914 EDE)
+//! Clean-room Enterprise Protective DNS Domain Policy Engine (Allowlist / Blocklist + CNAME chain +
+//! DNS Rebinding Protection + Custom Split-Horizon Hosts + Lock-Free Hot-Reload + RFC 8914 EDE)
 //! and Per-IP / IPv6-Prefix Token-Bucket Rate Limiter.
 
 use std::collections::hash_map::RandomState;
@@ -6,14 +7,17 @@ use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::hash::BuildHasher;
 use std::net::IpAddr;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
-use std::time::Instant;
+use std::time::{Duration, Instant, SystemTime};
+
+use arc_swap::ArcSwap;
 
 use crate::dns::ecs::mask_ipv6;
 use crate::dns::wire::{
-    build_policy_response, extract_answer_domain_names, EDE_BLOCKED, EDE_FILTERED, EDE_PROHIBITED,
-    RCODE_NOERROR, RCODE_NXDOMAIN, RCODE_REFUSED,
+    build_hosts_response, build_policy_response, extract_answer_domain_names, extract_answer_ips,
+    EDE_BLOCKED, EDE_FILTERED, EDE_PROHIBITED, RCODE_NOERROR, RCODE_NXDOMAIN, RCODE_REFUSED,
+    RR_TYPE_A, RR_TYPE_AAAA, RR_TYPE_PTR,
 };
 use crate::error::DohError;
 
@@ -50,12 +54,71 @@ impl BlockAction {
     }
 }
 
-/// Enterprise Protective DNS domain filtering policy (disabled by default until lists are provided).
+/// Returns `true` if `ip` is a private, loopback, link-local, CGNAT, ULA, or unspecified address
+/// that must not be returned by a public authoritative DNS server when DNS rebinding protection is enabled.
+pub fn is_private_or_special_ip(ip: IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(v4) => {
+            let octets = v4.octets();
+            v4.is_unspecified()
+                || v4.is_loopback()
+                || v4.is_private()
+                || v4.is_link_local()
+                || v4.is_broadcast()
+                || v4.is_documentation()
+                // RFC 6598 Shared CGNAT space (100.64.0.0/10)
+                || (octets[0] == 100 && (octets[1] & 0b1100_0000) == 64)
+        }
+        IpAddr::V6(v6) => {
+            if let Some(mapped_v4) = v6.to_ipv4_mapped() {
+                return is_private_or_special_ip(IpAddr::V4(mapped_v4));
+            }
+            let seg0 = v6.segments()[0];
+            v6.is_unspecified()
+                || v6.is_loopback()
+                // RFC 4193 Unique Local Addresses (fc00::/7)
+                || (seg0 & 0xfe00) == 0xfc00
+                // Link-local unicast (fe80::/10)
+                || (seg0 & 0xffc0) == 0xfe80
+        }
+    }
+}
+
+/// Formats an `IpAddr` into its reverse DNS lookup name (`in-addr.arpa` or `ip6.arpa`).
+pub fn reverse_ptr_name(ip: IpAddr) -> String {
+    match ip {
+        IpAddr::V4(v4) => {
+            let [a, b, c, d] = v4.octets();
+            format!("{d}.{c}.{b}.{a}.in-addr.arpa")
+        }
+        IpAddr::V6(v6) => {
+            let mut nibbles = String::with_capacity(72);
+            for byte in v6.octets().iter().rev() {
+                let lo = byte & 0x0f;
+                let hi = (byte >> 4) & 0x0f;
+                nibbles.push_str(&format!("{lo:x}.{hi:x}."));
+            }
+            nibbles.push_str("ip6.arpa");
+            nibbles
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+struct DomainPolicyInner {
+    allow_domains: HashSet<String>,
+    block_domains: HashSet<String>,
+    hosts_forward: HashMap<String, Vec<IpAddr>>,
+    hosts_reverse: HashMap<String, String>,
+    action: BlockAction,
+    block_private_rebinding: bool,
+}
+
+/// Enterprise Protective DNS domain filtering policy, split-horizon hosts table, and DNS rebinding guard.
+/// Supports lock-free hot-reloading via `ArcSwap` when policy or hosts files are updated on disk.
 #[derive(Debug, Clone, Default)]
 pub struct DomainPolicy {
-    allow_domains: Arc<HashSet<String>>,
-    block_domains: Arc<HashSet<String>>,
-    action: BlockAction,
+    inner: Arc<ArcSwap<DomainPolicyInner>>,
 }
 
 impl DomainPolicy {
@@ -66,6 +129,36 @@ impl DomainPolicy {
         blocklist_path: Option<&Path>,
         action: BlockAction,
     ) -> Result<Self, DohError> {
+        Self::from_files_full(allowlist_path, blocklist_path, None, action, false)
+    }
+
+    /// Loads optional allowlist, blocklist, and split-horizon custom hosts files, plus DNS rebinding protection setting.
+    pub fn from_files_full(
+        allowlist_path: Option<&Path>,
+        blocklist_path: Option<&Path>,
+        hosts_path: Option<&Path>,
+        action: BlockAction,
+        block_private_rebinding: bool,
+    ) -> Result<Self, DohError> {
+        let inner = Self::load_inner(
+            allowlist_path,
+            blocklist_path,
+            hosts_path,
+            action,
+            block_private_rebinding,
+        )?;
+        Ok(Self {
+            inner: Arc::new(ArcSwap::from_pointee(inner)),
+        })
+    }
+
+    fn load_inner(
+        allowlist_path: Option<&Path>,
+        blocklist_path: Option<&Path>,
+        hosts_path: Option<&Path>,
+        action: BlockAction,
+        block_private_rebinding: bool,
+    ) -> Result<DomainPolicyInner, DohError> {
         let allow_domains = match allowlist_path {
             Some(p) => Self::parse_domain_file(p)?,
             None => HashSet::new(),
@@ -74,10 +167,17 @@ impl DomainPolicy {
             Some(p) => Self::parse_domain_file(p)?,
             None => HashSet::new(),
         };
-        Ok(Self {
-            allow_domains: Arc::new(allow_domains),
-            block_domains: Arc::new(block_domains),
+        let (hosts_forward, hosts_reverse) = match hosts_path {
+            Some(p) => Self::parse_hosts_file(p)?,
+            None => (HashMap::new(), HashMap::new()),
+        };
+        Ok(DomainPolicyInner {
+            allow_domains,
+            block_domains,
+            hosts_forward,
+            hosts_reverse,
             action,
+            block_private_rebinding,
         })
     }
 
@@ -89,6 +189,31 @@ impl DomainPolicy {
         S1: AsRef<str>,
         S2: AsRef<str>,
     {
+        Self::from_lists_with_options(
+            allow,
+            block,
+            std::iter::empty::<(IpAddr, &str)>(),
+            action,
+            false,
+        )
+    }
+
+    /// Creates an in-memory `DomainPolicy` with custom hosts entries and DNS rebinding protection setting.
+    pub fn from_lists_with_options<I, J, H, S1, S2, S3>(
+        allow: I,
+        block: J,
+        hosts: H,
+        action: BlockAction,
+        block_private_rebinding: bool,
+    ) -> Self
+    where
+        I: IntoIterator<Item = S1>,
+        J: IntoIterator<Item = S2>,
+        H: IntoIterator<Item = (IpAddr, S3)>,
+        S1: AsRef<str>,
+        S2: AsRef<str>,
+        S3: AsRef<str>,
+    {
         let allow_set = allow
             .into_iter()
             .filter_map(|s| Self::normalize_rule(s.as_ref()))
@@ -97,16 +222,121 @@ impl DomainPolicy {
             .into_iter()
             .filter_map(|s| Self::normalize_rule(s.as_ref()))
             .collect();
-        Self {
-            allow_domains: Arc::new(allow_set),
-            block_domains: Arc::new(block_set),
-            action,
+        let mut hosts_forward: HashMap<String, Vec<IpAddr>> = HashMap::new();
+        let mut hosts_reverse: HashMap<String, String> = HashMap::new();
+        for (ip, host) in hosts {
+            let clean = host.as_ref().trim_matches('.').to_ascii_lowercase();
+            if !clean.is_empty() {
+                hosts_forward.entry(clean.clone()).or_default().push(ip);
+                hosts_reverse.entry(reverse_ptr_name(ip)).or_insert(clean);
+            }
         }
+        Self {
+            inner: Arc::new(ArcSwap::from_pointee(DomainPolicyInner {
+                allow_domains: allow_set,
+                block_domains: block_set,
+                hosts_forward,
+                hosts_reverse,
+                action,
+                block_private_rebinding,
+            })),
+        }
+    }
+
+    /// Atomically reloads `allowlist_path`, `blocklist_path`, and `hosts_path` from disk via `ArcSwap`.
+    pub fn reload_from_files(
+        &self,
+        allowlist_path: Option<&Path>,
+        blocklist_path: Option<&Path>,
+        hosts_path: Option<&Path>,
+        action: BlockAction,
+        block_private_rebinding: bool,
+    ) -> Result<(), DohError> {
+        let new_inner = Self::load_inner(
+            allowlist_path,
+            blocklist_path,
+            hosts_path,
+            action,
+            block_private_rebinding,
+        )?;
+        self.inner.store(Arc::new(new_inner));
+        Ok(())
+    }
+
+    /// Spawns a background hot-reload task that checks `mtime` on `allowlist_file`, `blocklist_file`,
+    /// and `hosts_file` every `interval` (default 60s) and atomically swaps the policy on change.
+    pub fn spawn_reload_watcher(
+        &self,
+        allowlist_path: Option<PathBuf>,
+        blocklist_path: Option<PathBuf>,
+        hosts_path: Option<PathBuf>,
+        action: BlockAction,
+        block_private_rebinding: bool,
+        interval: Duration,
+    ) {
+        if allowlist_path.is_none() && blocklist_path.is_none() && hosts_path.is_none() {
+            return;
+        }
+        let policy_clone = self.clone();
+        let file_mtimes = |a: &Option<PathBuf>,
+                           b: &Option<PathBuf>,
+                           h: &Option<PathBuf>|
+         -> (Option<SystemTime>, Option<SystemTime>, Option<SystemTime>) {
+            let ma = a
+                .as_ref()
+                .and_then(|p| fs::metadata(p).ok())
+                .and_then(|m| m.modified().ok());
+            let mb = b
+                .as_ref()
+                .and_then(|p| fs::metadata(p).ok())
+                .and_then(|m| m.modified().ok());
+            let mh = h
+                .as_ref()
+                .and_then(|p| fs::metadata(p).ok())
+                .and_then(|m| m.modified().ok());
+            (ma, mb, mh)
+        };
+        let mut last_mtimes = file_mtimes(&allowlist_path, &blocklist_path, &hosts_path);
+        tokio::spawn(async move {
+            let mut ticker = tokio::time::interval(interval.max(Duration::from_millis(100)));
+            ticker.tick().await;
+            loop {
+                ticker.tick().await;
+                let cur_mtimes = file_mtimes(&allowlist_path, &blocklist_path, &hosts_path);
+                if cur_mtimes != last_mtimes {
+                    match Self::load_inner(
+                        allowlist_path.as_deref(),
+                        blocklist_path.as_deref(),
+                        hosts_path.as_deref(),
+                        action,
+                        block_private_rebinding,
+                    ) {
+                        Ok(new_inner) => {
+                            policy_clone.inner.store(Arc::new(new_inner));
+                            last_mtimes = cur_mtimes;
+                            tracing::info!("hot-reloaded Protective DNS policy / hosts files");
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                "keeping previous Protective DNS policy after reload error: {e}"
+                            );
+                        }
+                    }
+                }
+            }
+        });
     }
 
     #[inline]
     pub fn is_enabled(&self) -> bool {
-        !self.block_domains.is_empty()
+        let guard = self.inner.load();
+        !guard.block_domains.is_empty() || guard.block_private_rebinding
+    }
+
+    #[inline]
+    pub fn has_hosts(&self) -> bool {
+        let guard = self.inner.load();
+        !guard.hosts_forward.is_empty() || !guard.hosts_reverse.is_empty()
     }
 
     fn parse_domain_file(path: &Path) -> Result<HashSet<String>, DohError> {
@@ -123,6 +353,41 @@ impl DomainPolicy {
             }
         }
         Ok(set)
+    }
+
+    #[allow(clippy::type_complexity)]
+    fn parse_hosts_file(
+        path: &Path,
+    ) -> Result<(HashMap<String, Vec<IpAddr>>, HashMap<String, String>), DohError> {
+        let content = fs::read_to_string(path).map_err(|e| {
+            DohError::InvalidConfig(format!("failed to read hosts file {}: {e}", path.display()))
+        })?;
+        let mut forward: HashMap<String, Vec<IpAddr>> = HashMap::new();
+        let mut reverse: HashMap<String, String> = HashMap::new();
+        for raw_line in content.lines() {
+            let without_comment = raw_line.split('#').next().unwrap_or("").trim();
+            if without_comment.is_empty() {
+                continue;
+            }
+            let mut parts = without_comment.split_whitespace();
+            let Some(ip_str) = parts.next() else {
+                continue;
+            };
+            let ip: IpAddr = ip_str.parse().map_err(|e| {
+                DohError::InvalidConfig(format!(
+                    "invalid IP address '{ip_str}' in hosts file {}: {e}",
+                    path.display()
+                ))
+            })?;
+            for host_token in parts {
+                let clean = host_token.trim_matches('.').to_ascii_lowercase();
+                if !clean.is_empty() {
+                    forward.entry(clean.clone()).or_default().push(ip);
+                    reverse.entry(reverse_ptr_name(ip)).or_insert(clean);
+                }
+            }
+        }
+        Ok((forward, reverse))
     }
 
     fn normalize_rule(line: &str) -> Option<String> {
@@ -165,32 +430,102 @@ impl DomainPolicy {
         }
     }
 
+    /// Checks whether `qname_lower` matches a local split-horizon host override for `A`, `AAAA`, or `PTR`
+    /// and returns a synthesized `NOERROR` wire response if matched.
+    pub fn try_resolve_hosts(
+        &self,
+        query: &[u8],
+        qname_lower: &str,
+        qtype: u16,
+        ttl: u32,
+    ) -> Result<Option<Vec<u8>>, DohError> {
+        let guard = self.inner.load();
+        if guard.hosts_forward.is_empty() && guard.hosts_reverse.is_empty() {
+            return Ok(None);
+        }
+        let clean = qname_lower.trim_matches('.');
+        match qtype {
+            RR_TYPE_A | RR_TYPE_AAAA => {
+                if let Some(ips) = guard.hosts_forward.get(clean) {
+                    let has_matching_family = ips.iter().any(|ip| {
+                        (qtype == RR_TYPE_A && ip.is_ipv4())
+                            || (qtype == RR_TYPE_AAAA && ip.is_ipv6())
+                    });
+                    if has_matching_family {
+                        let wire = build_hosts_response(query, ips, None, ttl)?;
+                        return Ok(Some(wire));
+                    }
+                }
+            }
+            RR_TYPE_PTR => {
+                if let Some(target) = guard.hosts_reverse.get(clean) {
+                    let wire = build_hosts_response(query, &[], Some(target), ttl)?;
+                    return Ok(Some(wire));
+                }
+            }
+            _ => {}
+        }
+        Ok(None)
+    }
+
     /// Returns `true` if `qname` (already lowercase) is blocked by this policy.
     /// Allowlist entries always take precedence over blocklist entries.
     pub fn is_blocked(&self, qname_lower: &str) -> bool {
-        if self.block_domains.is_empty() {
+        let guard = self.inner.load();
+        if guard.block_domains.is_empty() {
             return false;
         }
-        if Self::matches_hierarchy(qname_lower, &self.allow_domains) {
+        if Self::matches_hierarchy(qname_lower, &guard.allow_domains) {
             return false;
         }
-        Self::matches_hierarchy(qname_lower, &self.block_domains)
+        Self::matches_hierarchy(qname_lower, &guard.block_domains)
+    }
+
+    fn is_blocked_with_guard(guard: &DomainPolicyInner, qname_lower: &str) -> bool {
+        if guard.block_domains.is_empty() {
+            return false;
+        }
+        if Self::matches_hierarchy(qname_lower, &guard.allow_domains) {
+            return false;
+        }
+        Self::matches_hierarchy(qname_lower, &guard.block_domains)
     }
 
     /// Inspects all owner names and CNAME/DNAME targets in the Answer section of `response_packet`
     /// and returns `true` if any name in the answer chain is blocked by this policy (N-4).
     pub fn is_answer_blocked(&self, response_packet: &[u8]) -> bool {
-        if !self.is_enabled() {
+        let guard = self.inner.load();
+        if guard.block_domains.is_empty() {
             return false;
         }
         extract_answer_domain_names(response_packet)
             .iter()
-            .any(|name| self.is_blocked(name))
+            .any(|name| Self::is_blocked_with_guard(&guard, name))
+    }
+
+    /// Inspects resolved `A` and `AAAA` records in `response_packet` and returns `true` if DNS Rebinding
+    /// Protection is enabled (`block_private_rebinding == true`), the queried domain is not allowlisted,
+    /// and any resolved IP is private, loopback, link-local, CGNAT, or ULA.
+    pub fn is_rebinding_blocked(&self, qname_lower: &str, response_packet: &[u8]) -> bool {
+        let guard = self.inner.load();
+        if !guard.block_private_rebinding {
+            return false;
+        }
+        let clean = qname_lower.trim_matches('.');
+        if Self::matches_hierarchy(clean, &guard.allow_domains)
+            || guard.hosts_forward.contains_key(clean)
+        {
+            return false;
+        }
+        extract_answer_ips(response_packet)
+            .into_iter()
+            .any(is_private_or_special_ip)
     }
 
     /// Builds a synthetic blocked DNS wire response with RFC 8914 Extended DNS Error (`EDE`) metadata.
     pub fn build_blocked_response(&self, query: &[u8], ttl: u32) -> Result<Vec<u8>, DohError> {
-        match self.action {
+        let guard = self.inner.load();
+        match guard.action {
             BlockAction::Nxdomain => build_policy_response(
                 query,
                 RCODE_NXDOMAIN,
@@ -213,6 +548,29 @@ impl DomainPolicy {
                 ttl,
             ),
         }
+    }
+
+    /// Builds a synthetic DNS rebinding blocked response (`RCODE_REFUSED` or configured action + `EDE 15`).
+    pub fn build_rebinding_blocked_response(
+        &self,
+        query: &[u8],
+        ttl: u32,
+    ) -> Result<Vec<u8>, DohError> {
+        let guard = self.inner.load();
+        let rcode_val = match guard.action {
+            BlockAction::Refused => RCODE_REFUSED,
+            _ => RCODE_NXDOMAIN,
+        };
+        build_policy_response(
+            query,
+            rcode_val,
+            false,
+            Some((
+                EDE_BLOCKED,
+                "Blocked by DNS Rebinding Protection (private IP in public answer)",
+            )),
+            ttl,
+        )
     }
 }
 

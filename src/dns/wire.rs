@@ -1,7 +1,8 @@
 //! Clean-room DNS wire-format inspection, validation, TTL management, and RFC 8914 EDE synthesis
-//! (RFC 1035, RFC 2308, RFC 5452, RFC 6891, RFC 7830, RFC 8467, RFC 8482, RFC 8484, RFC 8914).
+//! (RFC 1035, RFC 2308, RFC 5452, RFC 6891, RFC 7830, RFC 8467, RFC 8482, RFC 8484, RFC 8767, RFC 8914).
 
 use std::fmt::Write as _;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
 use crate::error::DohError;
 
@@ -24,6 +25,7 @@ pub const RESPONSE_PADDING_BLOCK_SIZE: usize = 468;
 pub const RR_TYPE_A: u16 = 1;
 pub const RR_TYPE_CNAME: u16 = 5;
 pub const RR_TYPE_SOA: u16 = 6;
+pub const RR_TYPE_PTR: u16 = 12;
 pub const RR_TYPE_AAAA: u16 = 28;
 pub const RR_TYPE_DNAME: u16 = 39;
 pub const RR_TYPE_OPT: u16 = 41;
@@ -40,6 +42,7 @@ pub const EDNS_OPT_PADDING: u16 = 12;
 pub const EDNS_OPT_EDE: u16 = 15;
 
 /// RFC 8914 Extended DNS Error (`INFO-CODE`) constants.
+pub const EDE_STALE_ANSWER: u16 = 3;
 pub const EDE_BLOCKED: u16 = 15;
 pub const EDE_CENSORED: u16 = 16;
 pub const EDE_FILTERED: u16 = 17;
@@ -496,6 +499,44 @@ pub fn extract_answer_domain_names(packet: &[u8]) -> Vec<String> {
     names
 }
 
+/// Extracts all resolved `A` (IPv4) and `AAAA` (IPv6) addresses from the Answer section of `packet`.
+pub fn extract_answer_ips(packet: &[u8]) -> Vec<IpAddr> {
+    let mut ips = Vec::new();
+    let Ok(mut offset) = skip_questions(packet) else {
+        return ips;
+    };
+    let an = ancount(packet) as usize;
+    for _ in 0..an {
+        let Ok(after_name) = skip_name(packet, offset) else {
+            break;
+        };
+        if after_name + 10 > packet.len() {
+            break;
+        }
+        let Ok(rr_type) = read_u16_be(packet, after_name) else {
+            break;
+        };
+        let Ok(rdlen) = read_u16_be(packet, after_name + 8) else {
+            break;
+        };
+        let rdata_start = after_name + 10;
+        let rdata_end = rdata_start + (rdlen as usize);
+        if rdata_end > packet.len() {
+            break;
+        }
+        if rr_type == RR_TYPE_A && rdlen == 4 {
+            let b = &packet[rdata_start..rdata_end];
+            ips.push(IpAddr::V4(Ipv4Addr::new(b[0], b[1], b[2], b[3])));
+        } else if rr_type == RR_TYPE_AAAA && rdlen == 16 {
+            let mut octets = [0u8; 16];
+            octets.copy_from_slice(&packet[rdata_start..rdata_end]);
+            ips.push(IpAddr::V6(Ipv6Addr::from(octets)));
+        }
+        offset = rdata_end;
+    }
+    ips
+}
+
 /// Returns the byte offset immediately following the Question section.
 pub fn skip_questions(packet: &[u8]) -> Result<usize, DohError> {
     if packet.len() < MIN_DNS_PACKET_LEN {
@@ -649,6 +690,174 @@ pub fn decrement_wire_ttls(packet: &mut [u8], elapsed_secs: u32) -> Result<(), D
         }
     }
     Ok(())
+}
+
+/// Sets the 32-bit TTL of all non-OPT Resource Records in `packet` to `fixed_ttl` (used by RFC 8767 §4 Serve-Stale).
+pub fn set_all_wire_ttls(packet: &mut [u8], fixed_ttl: u32) -> Result<(), DohError> {
+    let mut offset = skip_questions(packet)?;
+    let total_rrs =
+        (ancount(packet) as usize) + (nscount(packet) as usize) + (arcount(packet) as usize);
+
+    for _ in 0..total_rrs {
+        offset = skip_name(packet, offset)?;
+        if offset + 10 > packet.len() {
+            return Err(DohError::MalformedDnsPacket(
+                "truncated resource record header",
+            ));
+        }
+        let rr_type = read_u16_be(packet, offset)?;
+        let rdlen = read_u16_be(packet, offset + 8)? as usize;
+
+        if rr_type != RR_TYPE_OPT {
+            write_u32_be(packet, offset + 4, fixed_ttl)?;
+        }
+        offset += 10 + rdlen;
+        if offset > packet.len() {
+            return Err(DohError::MalformedDnsPacket(
+                "truncated resource record RDATA",
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Appends an RFC 8914 Extended DNS Error (`EDE`, Option Code 15) to an existing DNS wire response's `OPT` record
+/// (or creates a new `OPT` record if none is present).
+pub fn append_ede_to_existing_response(
+    packet: &mut Vec<u8>,
+    info_code: u16,
+    extra_text: &str,
+) -> Result<(), DohError> {
+    let mut offset = skip_questions(packet)?;
+    let (an, ns, ar) = (ancount(packet), nscount(packet), arcount(packet));
+
+    for _ in 0..((an as usize) + (ns as usize)) {
+        offset = skip_name(packet, offset)?;
+        if offset + 10 > packet.len() {
+            return Err(DohError::MalformedDnsPacket("record out of bounds"));
+        }
+        let rdlen = read_u16_be(packet, offset + 8)? as usize;
+        offset += 10 + rdlen;
+    }
+
+    let mut opt_type_offset: Option<usize> = None;
+    for _ in 0..(ar as usize) {
+        offset = skip_name(packet, offset)?;
+        if offset + 10 > packet.len() {
+            return Err(DohError::MalformedDnsPacket("truncated additional record"));
+        }
+        let rr_type = read_u16_be(packet, offset)?;
+        let rdlen = read_u16_be(packet, offset + 8)? as usize;
+        if rr_type == RR_TYPE_OPT {
+            opt_type_offset = Some(offset);
+        }
+        offset += 10 + rdlen;
+    }
+
+    let opt_offset = match opt_type_offset {
+        Some(off) => off,
+        None => append_empty_opt_record(packet, UPSTREAM_EDNS_UDP_SIZE)?,
+    };
+
+    let text_bytes = extra_text.as_bytes();
+    let ede_opt_len = (2 + text_bytes.len()) as u16;
+    let rdlen_offset = opt_offset + 8;
+    let cur_rdlen = read_u16_be(packet, rdlen_offset)?;
+    let new_rdlen = cur_rdlen
+        .checked_add(4 + ede_opt_len)
+        .ok_or(DohError::PayloadTooLarge)?;
+    if packet.len() + 4 + (ede_opt_len as usize) > MAX_DNS_MESSAGE_LEN {
+        return Err(DohError::PayloadTooLarge);
+    }
+
+    // Only append directly if the OPT record is the last record in the packet
+    let opt_end = rdlen_offset + 2 + (cur_rdlen as usize);
+    if opt_end == packet.len() {
+        write_u16_be(packet, rdlen_offset, new_rdlen)?;
+        packet.extend_from_slice(&EDNS_OPT_EDE.to_be_bytes());
+        packet.extend_from_slice(&ede_opt_len.to_be_bytes());
+        packet.extend_from_slice(&info_code.to_be_bytes());
+        packet.extend_from_slice(text_bytes);
+    }
+    Ok(())
+}
+
+/// Synthesizes a local split-horizon `NOERROR` response from custom hosts entries (`A`, `AAAA`, or `PTR`).
+pub fn build_hosts_response(
+    query: &[u8],
+    ips: &[IpAddr],
+    ptr_target: Option<&str>,
+    ttl: u32,
+) -> Result<Vec<u8>, DohError> {
+    let parsed = validate_and_parse_query(query)?;
+    let mut resp = Vec::with_capacity(128);
+    resp.extend_from_slice(&query[..parsed.question_end_offset]);
+
+    let rd_bit = query[2] & 0x01;
+    let cd_bit = query[3] & 0x10;
+    // QR=1, AA=1 (0x04), RD preserved, RA=1 (0x80), RCODE=0 (NOERROR)
+    resp[2] = 0x84 | rd_bit;
+    resp[3] = 0x80 | cd_bit;
+    write_u16_be(&mut resp, 6, 0)?;
+    write_u16_be(&mut resp, 8, 0)?;
+    write_u16_be(&mut resp, 10, 0)?;
+
+    let mut an_count = 0u16;
+    if parsed.qclass == DNS_CLASS_IN {
+        match parsed.qtype {
+            RR_TYPE_A => {
+                for ip in ips {
+                    if let IpAddr::V4(v4) = ip {
+                        resp.extend_from_slice(&[0xc0, 0x0c]);
+                        resp.extend_from_slice(&RR_TYPE_A.to_be_bytes());
+                        resp.extend_from_slice(&DNS_CLASS_IN.to_be_bytes());
+                        resp.extend_from_slice(&ttl.to_be_bytes());
+                        resp.extend_from_slice(&4u16.to_be_bytes());
+                        resp.extend_from_slice(&v4.octets());
+                        an_count += 1;
+                    }
+                }
+            }
+            RR_TYPE_AAAA => {
+                for ip in ips {
+                    if let IpAddr::V6(v6) = ip {
+                        resp.extend_from_slice(&[0xc0, 0x0c]);
+                        resp.extend_from_slice(&RR_TYPE_AAAA.to_be_bytes());
+                        resp.extend_from_slice(&DNS_CLASS_IN.to_be_bytes());
+                        resp.extend_from_slice(&ttl.to_be_bytes());
+                        resp.extend_from_slice(&16u16.to_be_bytes());
+                        resp.extend_from_slice(&v6.octets());
+                        an_count += 1;
+                    }
+                }
+            }
+            RR_TYPE_PTR => {
+                if let Some(target_domain) = ptr_target {
+                    let mut encoded_target = Vec::with_capacity(target_domain.len() + 2);
+                    for label in target_domain.trim_matches('.').split('.') {
+                        if !label.is_empty() && label.len() <= 63 {
+                            encoded_target.push(label.len() as u8);
+                            encoded_target.extend_from_slice(label.as_bytes());
+                        }
+                    }
+                    encoded_target.push(0);
+                    resp.extend_from_slice(&[0xc0, 0x0c]);
+                    resp.extend_from_slice(&RR_TYPE_PTR.to_be_bytes());
+                    resp.extend_from_slice(&DNS_CLASS_IN.to_be_bytes());
+                    resp.extend_from_slice(&ttl.to_be_bytes());
+                    resp.extend_from_slice(&(encoded_target.len() as u16).to_be_bytes());
+                    resp.extend_from_slice(&encoded_target);
+                    an_count += 1;
+                }
+            }
+            _ => {}
+        }
+    }
+    write_u16_be(&mut resp, 6, an_count)?;
+    if parsed.has_edns0 {
+        append_empty_opt_record(&mut resp, UPSTREAM_EDNS_UDP_SIZE)?;
+    }
+    Ok(resp)
 }
 
 /// Extracts all RFC 8914 Extended DNS Error (`EDE`, Option Code 15) entries from the `OPT` record in `packet`.

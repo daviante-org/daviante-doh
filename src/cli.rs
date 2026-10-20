@@ -22,7 +22,7 @@ use tracing_core::{Event, Interest, Metadata, Subscriber};
 
 use crate::{
     serve_with_admin_and_shutdown, BlockAction, ClientIpLogMode, DohConfig, DohEngine, IpNet,
-    OdohKeyManager,
+    OdohKeyManager, UpstreamStrategy,
 };
 
 /// Removes any `DOH_*` environment variables whose values are empty or whitespace-only.
@@ -300,6 +300,41 @@ pub fn build_cli() -> Command {
             "0",
             "In-memory DNS cache capacity in entries (0 = disabled by default)",
         ))
+        .arg(u32_opt_arg(
+            "serve_stale_ttl",
+            "serve-stale-ttl",
+            None,
+            "DOH_SERVE_STALE_TTL",
+            "0",
+            "RFC 8767 serve-stale retention window in seconds on upstream outage (0 = disabled)",
+        ))
+        .arg(bool_flag_arg(
+            "cache_prefetch",
+            "cache-prefetch",
+            None,
+            "DOH_CACHE_PREFETCH",
+            "Proactively refresh hot cached entries when remaining TTL drops below 10% (off by default)",
+        ))
+        .arg(bool_flag_arg(
+            "disable_coalescing",
+            "disable-coalescing",
+            None,
+            "DOH_DISABLE_COALESCING",
+            "Disable Singleflight in-flight query coalescing for identical concurrent cache misses",
+        ))
+        .arg(
+            Arg::new("upstream_strategy")
+                .long("upstream-strategy")
+                .env("DOH_UPSTREAM_STRATEGY")
+                .default_value("failover")
+                .help("Upstream load-balancing strategy: failover (default), round-robin, or parallel"),
+        )
+        .arg(
+            Arg::new("upstream_dot_sni")
+                .long("upstream-dot-sni")
+                .env("DOH_UPSTREAM_DOT_SNI")
+                .help("Enable RFC 7858 Upstream DNS-over-TLS (DoT) using the specified TLS SNI hostname"),
+        )
         .arg(bool_flag_arg(
             "disable_keepalive",
             "disable-keepalive",
@@ -372,12 +407,25 @@ pub fn build_cli() -> Command {
                 .help("Path to Protective DNS domain blocklist file (off by default)"),
         )
         .arg(
+            Arg::new("hosts_file")
+                .long("hosts-file")
+                .env("DOH_HOSTS_FILE")
+                .help("Path to local split-horizon /etc/hosts override file for A, AAAA, and PTR records"),
+        )
+        .arg(
             Arg::new("block_action")
                 .long("block-action")
                 .env("DOH_BLOCK_ACTION")
                 .default_value("nxdomain")
                 .help("Action when a domain is blocked: nxdomain (EDE 15), refused (EDE 18), or null (EDE 17)"),
         )
+        .arg(bool_flag_arg(
+            "block_private_rebinding",
+            "block-private-rebinding",
+            None,
+            "DOH_BLOCK_PRIVATE_REBINDING",
+            "Block upstream responses that resolve public domains to private/loopback/link-local IPs (DNS rebinding protection)",
+        ))
         .arg(u32_opt_arg(
             "rate_limit_rps",
             "rate-limit-rps",
@@ -556,8 +604,20 @@ pub fn parse_from_matches(m: &ArgMatches) -> Result<ParsedCli, String> {
         .get_one::<String>("blocklist_file")
         .filter(|s| !s.trim().is_empty())
         .map(PathBuf::from);
+    let hosts_file = m
+        .get_one::<String>("hosts_file")
+        .filter(|s| !s.trim().is_empty())
+        .map(PathBuf::from);
     let block_action_str = m.get_one::<String>("block_action").unwrap();
     let block_action = BlockAction::from_str_name(block_action_str).map_err(|e| e.to_string())?;
+
+    let upstream_strategy_str = m.get_one::<String>("upstream_strategy").unwrap();
+    let upstream_strategy =
+        UpstreamStrategy::from_str_name(upstream_strategy_str).map_err(|e| e.to_string())?;
+    let upstream_dot_sni = m
+        .get_one::<String>("upstream_dot_sni")
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
 
     let log_client_ip_str = m.get_one::<String>("log_client_ip").unwrap();
     let log_client_ip =
@@ -607,6 +667,17 @@ pub fn parse_from_matches(m: &ArgMatches) -> Result<ParsedCli, String> {
         stale_if_error_secs: *m.get_one::<u32>("stale_if_error").unwrap(),
         stale_while_revalidate_secs: *m.get_one::<u32>("stale_while_revalidate").unwrap(),
         cache_size: *m.get_one::<usize>("cache_size").unwrap(),
+        serve_stale_ttl: *m.get_one::<u32>("serve_stale_ttl").unwrap(),
+        cache_prefetch: m
+            .get_one::<bool>("cache_prefetch")
+            .copied()
+            .unwrap_or(false),
+        coalesce_queries: !m
+            .get_one::<bool>("disable_coalescing")
+            .copied()
+            .unwrap_or(false),
+        upstream_strategy,
+        upstream_dot_sni,
         keepalive: !m
             .get_one::<bool>("disable_keepalive")
             .copied()
@@ -623,7 +694,12 @@ pub fn parse_from_matches(m: &ArgMatches) -> Result<ParsedCli, String> {
         odoh_rotation_secs: *m.get_one::<u32>("odoh_rotation_secs").unwrap(),
         allowlist_file,
         blocklist_file,
+        hosts_file,
         block_action,
+        block_private_rebinding: m
+            .get_one::<bool>("block_private_rebinding")
+            .copied()
+            .unwrap_or(false),
         rate_limit_rps: *m.get_one::<u32>("rate_limit_rps").unwrap(),
         rate_limit_burst: *m.get_one::<u32>("rate_limit_burst").unwrap(),
         rate_limit_v6_prefix: *m.get_one::<u8>("rate_limit_v6_prefix").unwrap(),
@@ -767,6 +843,28 @@ pub fn format_config_summary(parsed: &ParsedCli) -> String {
     }
     if let Some(ref p) = c.blocklist_file {
         flags.push(format!("--blocklist-file {}", p.display()));
+    }
+    if let Some(ref p) = c.hosts_file {
+        flags.push(format!("--hosts-file {}", p.display()));
+    }
+    if c.block_private_rebinding {
+        flags.push("--block-private-rebinding".into());
+    }
+    if c.serve_stale_ttl > 0 {
+        flags.push(format!("--serve-stale-ttl {}", c.serve_stale_ttl));
+    }
+    if c.cache_prefetch {
+        flags.push("--cache-prefetch".into());
+    }
+    if !c.coalesce_queries {
+        flags.push("--disable-coalescing".into());
+    }
+    flags.push(format!(
+        "--upstream-strategy {}",
+        c.upstream_strategy.as_str()
+    ));
+    if let Some(ref sni) = c.upstream_dot_sni {
+        flags.push(format!("--upstream-dot-sni {sni}"));
     }
     if c.log_queries {
         flags.push("--log-queries".into());

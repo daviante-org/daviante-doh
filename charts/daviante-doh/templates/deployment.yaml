@@ -1,6 +1,7 @@
 {{- $hasInlineAllow := gt (len .Values.policy.allowlist) 0 -}}
 {{- $hasInlineBlock := gt (len .Values.policy.blocklist) 0 -}}
-{{- $hasPolicyCm := or (ne .Values.policy.existingConfigMap "") $hasInlineAllow $hasInlineBlock -}}
+{{- $hasInlineHosts := gt (len .Values.policy.hosts) 0 -}}
+{{- $hasPolicyCm := or (ne .Values.policy.existingConfigMap "") $hasInlineAllow $hasInlineBlock $hasInlineHosts -}}
 {{- $policyCmName := .Values.policy.existingConfigMap -}}
 {{- if eq $policyCmName "" -}}
 {{- $policyCmName = printf "%s-policy" (include "daviante-doh.fullname" .) -}}

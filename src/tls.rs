@@ -21,7 +21,8 @@ use tokio_rustls::rustls::crypto::{
 use tokio_rustls::rustls::pki_types::pem::PemObject;
 use tokio_rustls::rustls::pki_types::{CertificateDer, PrivateKeyDer, ServerName, UnixTime};
 use tokio_rustls::rustls::{
-    ClientConfig, DigitallySignedStruct, Error as RustlsError, ServerConfig, SignatureScheme,
+    ClientConfig, DigitallySignedStruct, Error as RustlsError, RootCertStore, ServerConfig,
+    SignatureScheme,
 };
 use tokio_rustls::{TlsAcceptor, TlsConnector};
 
@@ -228,6 +229,77 @@ pub fn build_pinned_healthcheck_connector(cert_path: &Path) -> Result<TlsConnect
         .with_custom_certificate_verifier(verifier)
         .with_no_client_auth();
     client_cfg.alpn_protocols = vec![b"http/1.1".to_vec()];
+    Ok(TlsConnector::from(Arc::new(client_cfg)))
+}
+
+/// Builds a `TlsConnector` for RFC 7858 Upstream DNS-over-TLS (`DoT`) queries.
+/// Loads system root CA certificates from standard OS paths (`/etc/ssl/certs/ca-certificates.crt`,
+/// `/etc/pki/tls/certs/ca-bundle.crt`, `/etc/ssl/cert.pem`), `SSL_CERT_FILE` (if set), and
+/// `extra_ca_path` (if provided).
+pub fn build_upstream_dot_connector(
+    extra_ca_path: Option<&Path>,
+) -> Result<TlsConnector, DohError> {
+    let provider = Arc::new(tokio_rustls::rustls::crypto::ring::default_provider());
+
+    if let Some(extra) = extra_ca_path.filter(|p| p.is_file()) {
+        if let Ok(mut certs) = load_certs(extra) {
+            if !certs.is_empty() {
+                let pinned_leaf = certs.remove(0);
+                let verifier = Arc::new(PinnedLeafCertVerifier {
+                    pinned_leaf,
+                    provider: Arc::clone(&provider),
+                });
+                let client_cfg = ClientConfig::builder_with_provider(provider)
+                    .with_safe_default_protocol_versions()
+                    .map_err(|e| {
+                        DohError::InvalidConfig(format!("DoT TLS client config error: {e}"))
+                    })?
+                    .dangerous()
+                    .with_custom_certificate_verifier(verifier)
+                    .with_no_client_auth();
+                return Ok(TlsConnector::from(Arc::new(client_cfg)));
+            }
+        }
+    }
+
+    let mut root_store = RootCertStore::empty();
+    let system_paths = [
+        "/etc/ssl/certs/ca-certificates.crt",
+        "/etc/pki/tls/certs/ca-bundle.crt",
+        "/etc/ssl/cert.pem",
+    ];
+    for sys_path in system_paths {
+        let p = Path::new(sys_path);
+        if p.is_file() {
+            if let Ok(certs) = load_certs(p) {
+                for cert in certs {
+                    let _ = root_store.add(cert);
+                }
+            }
+        }
+    }
+    if let Some(env_ca) = std::env::var_os("SSL_CERT_FILE") {
+        let p = Path::new(&env_ca);
+        if p.is_file() {
+            if let Ok(certs) = load_certs(p) {
+                for cert in certs {
+                    let _ = root_store.add(cert);
+                }
+            }
+        }
+    }
+
+    if root_store.is_empty() {
+        return Err(DohError::UpstreamError(
+            "no root CA certificates available for upstream DoT verification".into(),
+        ));
+    }
+
+    let client_cfg = ClientConfig::builder_with_provider(provider)
+        .with_safe_default_protocol_versions()
+        .map_err(|e| DohError::InvalidConfig(format!("DoT TLS client config error: {e}")))?
+        .with_root_certificates(root_store)
+        .with_no_client_auth();
     Ok(TlsConnector::from(Arc::new(client_cfg)))
 }
 
