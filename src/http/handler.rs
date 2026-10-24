@@ -21,6 +21,7 @@ use serde_json::json;
 use tokio::sync::Semaphore;
 use tokio::time::Instant;
 
+use crate::admin::auth::AdminSessionStore;
 use crate::cache::{CacheKey, DnsCache};
 use crate::dns::ecs::{resolve_client_ip, truncate_ip};
 use crate::dns::json::{
@@ -70,6 +71,7 @@ pub struct DohEngine {
     pub rate_limiter: IpRateLimiter,
     pub metrics: DohMetrics,
     pub upstreams: UpstreamSet,
+    pub admin_sessions: AdminSessionStore,
     draining: Arc<AtomicBool>,
     cors_origin_header: HeaderValue,
 }
@@ -84,10 +86,11 @@ impl DohEngine {
         })?;
         let tcp_slots = (config.max_clients / 4).max(8);
         let cache = DnsCache::with_serve_stale(config.cache_size, config.serve_stale_ttl);
-        let policy = DomainPolicy::from_files_full(
+        let policy = DomainPolicy::from_files_with_store(
             config.allowlist_file.as_deref(),
             config.blocklist_file.as_deref(),
             config.hosts_file.as_deref(),
+            config.dns_store_file.as_deref(),
             config.block_action,
             config.block_private_rebinding,
         )?;
@@ -106,9 +109,44 @@ impl DohEngine {
             rate_limiter,
             metrics: DohMetrics::new(),
             upstreams: UpstreamSet::default(),
+            admin_sessions: AdminSessionStore::new(),
             draining: Arc::new(AtomicBool::new(false)),
             cors_origin_header,
         })
+    }
+
+    #[inline]
+    pub fn config(&self) -> &DohConfig {
+        &self.config
+    }
+
+    #[inline]
+    pub fn policy(&self) -> &DomainPolicy {
+        &self.policy
+    }
+
+    #[inline]
+    pub fn cache(&self) -> &DnsCache {
+        &self.cache
+    }
+
+    #[inline]
+    pub fn metrics(&self) -> &DohMetrics {
+        &self.metrics
+    }
+
+    #[inline]
+    pub fn admin_sessions(&self) -> &AdminSessionStore {
+        &self.admin_sessions
+    }
+
+    /// Returns `(upstream_addr, is_healthy)` for each configured upstream DNS server.
+    pub fn upstream_health_list(&self) -> Vec<(SocketAddr, bool)> {
+        self.config
+            .effective_upstreams()
+            .into_iter()
+            .map(|addr| (addr, self.upstreams.is_healthy(addr)))
+            .collect()
     }
 
     /// Sets the graceful shutdown draining state (causes `/readyz` to return `503 Service Unavailable`).
@@ -123,22 +161,39 @@ impl DohEngine {
         self.draining.load(Ordering::Acquire)
     }
 
-    /// Handles an incoming HTTP request on the dedicated admin listener (`/livez`, `/readyz`, `/healthz`, `/metrics`).
+    /// Handles an incoming HTTP request on the dedicated admin listener (`/livez`, `/readyz`, `/healthz`, `/metrics`,
+    /// and when `--enable-admin-ui` is enabled, `/api/v1/*` and the PatternFly 6 SPA).
     pub async fn handle_admin_request(
         &self,
         req: Request<Incoming>,
+    ) -> Result<Response<HttpBody>, hyper::Error> {
+        self.handle_admin_request_with_peer(req, None).await
+    }
+
+    /// Handles an incoming HTTP request on the dedicated admin listener with client peer address.
+    pub async fn handle_admin_request_with_peer(
+        &self,
+        req: Request<Incoming>,
+        peer_addr: Option<SocketAddr>,
     ) -> Result<Response<HttpBody>, hyper::Error> {
         let path = req.uri().path();
         let method = req.method().clone();
         let is_head = method == Method::HEAD;
 
-        if !matches!(method, Method::GET | Method::HEAD) {
-            let mut resp = self.empty_status(StatusCode::METHOD_NOT_ALLOWED);
-            self.apply_security_headers(&mut resp);
+        if matches!(method, Method::GET | Method::HEAD) {
+            if let Some(resp) = self.try_handle_admin_path(path, is_head) {
+                return Ok(resp);
+            }
+        }
+
+        if self.config.enable_admin_ui {
+            let resp = crate::admin::api::handle_admin_ui_or_api(self, req, peer_addr).await;
             return Ok(resp);
         }
 
-        if let Some(resp) = self.try_handle_admin_path(path, is_head) {
+        if !matches!(method, Method::GET | Method::HEAD) {
+            let mut resp = self.empty_status(StatusCode::METHOD_NOT_ALLOWED);
+            self.apply_security_headers(&mut resp);
             return Ok(resp);
         }
 
@@ -591,23 +646,27 @@ impl DohEngine {
             );
         }
 
-        // 2b. Local Split-Horizon Hosts File Override (--hosts-file)
-        let hosts_ttl = self.config.min_ttl.max(60);
-        if let Some(unpadded) =
-            self.policy
-                .try_resolve_hosts(&query, &parsed.qname, parsed.qtype, hosts_ttl)?
-        {
+        // 2b. Local Split-Horizon DNS Records & Hosts File Override (--dns-store-file / --hosts-file)
+        let default_local_ttl = self.config.min_ttl.max(60);
+        if let Some((unpadded, effective_ttl)) = self.policy.try_resolve_local_records(
+            &query,
+            &parsed.qname,
+            parsed.qtype,
+            default_local_ttl,
+        )? {
             let mut client_wire = unpadded.clone();
             finalize_wire_response_for_client(&mut client_wire, parsed.has_edns0);
             self.metrics.inc_hosts_hit();
             let rc = rcode(&unpadded);
             self.metrics.record_rcode(rc);
+            self.metrics
+                .record_dns_activity(&parsed.qname, parsed.qtype, rc, "local_hosts", 0.05);
             self.emit_audit_log(&parsed.qname, parsed.qtype, rc, "hosts_file", client_ip);
             return Ok(ResolvedDnsPacket {
                 wire_bytes: client_wire,
                 unpadded_wire_bytes: unpadded,
-                cache_ttl: hosts_ttl,
-                internal_cache_ttl: hosts_ttl,
+                cache_ttl: effective_ttl,
+                internal_cache_ttl: effective_ttl,
                 age_secs: 0,
                 ecs_attached: false,
                 cacheable: false,
@@ -777,6 +836,62 @@ impl DohEngine {
         Ok(resolved)
     }
 
+    /// Executes the full DNS resolution pipeline for the Admin Live Lookup Tester (`/api/v1/dns/lookup`)
+    /// and returns `(ResolvedDnsPacket, resolution_source_label)`.
+    pub async fn resolve_for_admin_lookup(
+        &self,
+        query: Vec<u8>,
+        client_ip: Option<IpAddr>,
+    ) -> Result<(ResolvedDnsPacket, &'static str), DohError> {
+        let parsed = validate_and_parse_query(&query)?;
+        if self.policy.is_blocked(&parsed.qname) {
+            let res = self.synthesize_policy_blocked(
+                &query,
+                &parsed.qname,
+                parsed.qtype,
+                parsed.has_edns0,
+                "policy_blocked",
+                client_ip,
+            )?;
+            return Ok((res, "policy_blocked"));
+        }
+        let default_local_ttl = self.config.min_ttl.max(60);
+        if let Some((unpadded, effective_ttl)) = self.policy.try_resolve_local_records(
+            &query,
+            &parsed.qname,
+            parsed.qtype,
+            default_local_ttl,
+        )? {
+            let mut client_wire = unpadded.clone();
+            finalize_wire_response_for_client(&mut client_wire, parsed.has_edns0);
+            self.metrics.inc_hosts_hit();
+            let rc = rcode(&unpadded);
+            self.metrics.record_rcode(rc);
+            self.metrics
+                .record_dns_activity(&parsed.qname, parsed.qtype, rc, "local_hosts", 0.05);
+            return Ok((
+                ResolvedDnsPacket {
+                    wire_bytes: client_wire,
+                    unpadded_wire_bytes: unpadded,
+                    cache_ttl: effective_ttl,
+                    internal_cache_ttl: effective_ttl,
+                    age_secs: 0,
+                    ecs_attached: false,
+                    cacheable: false,
+                },
+                "local_store",
+            ));
+        }
+        let deadline = Instant::now() + self.config.timeout;
+        let resolved = self.process_dns_query(query, client_ip, deadline).await?;
+        let source = if resolved.age_secs > 0 {
+            "cache_hit"
+        } else {
+            "upstream"
+        };
+        Ok((resolved, source))
+    }
+
     fn spawn_cache_prefetch(&self, cache_key: CacheKey, query: Vec<u8>) {
         self.metrics.inc_cache_prefetch();
         let cfg = Arc::clone(&self.config);
@@ -874,6 +989,8 @@ impl DohEngine {
         finalize_wire_response_for_client(&mut client_wire, client_has_edns0);
         let rc = rcode(&unpadded);
         self.metrics.record_rcode(rc);
+        self.metrics
+            .record_dns_activity(qname, qtype, rc, "rebinding_blocked", 0.1);
         self.emit_audit_log(qname, qtype, rc, "rebinding_blocked", client_ip);
         Ok(ResolvedDnsPacket {
             wire_bytes: client_wire,
@@ -902,6 +1019,8 @@ impl DohEngine {
         finalize_wire_response_for_client(&mut client_wire, client_has_edns0);
         let rc = rcode(&unpadded);
         self.metrics.record_rcode(rc);
+        self.metrics
+            .record_dns_activity(qname, qtype, rc, audit_source, 0.05);
         self.emit_audit_log(qname, qtype, rc, audit_source, client_ip);
         Ok(ResolvedDnsPacket {
             wire_bytes: client_wire,

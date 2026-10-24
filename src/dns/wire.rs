@@ -23,9 +23,11 @@ pub const RESPONSE_PADDING_BLOCK_SIZE: usize = 468;
 
 /// Resource Record Type codes.
 pub const RR_TYPE_A: u16 = 1;
+pub const RR_TYPE_NS: u16 = 2;
 pub const RR_TYPE_CNAME: u16 = 5;
 pub const RR_TYPE_SOA: u16 = 6;
 pub const RR_TYPE_PTR: u16 = 12;
+pub const RR_TYPE_TXT: u16 = 16;
 pub const RR_TYPE_AAAA: u16 = 28;
 pub const RR_TYPE_DNAME: u16 = 39;
 pub const RR_TYPE_OPT: u16 = 41;
@@ -841,6 +843,119 @@ pub fn build_hosts_response(
         append_empty_opt_record(&mut resp, UPSTREAM_EDNS_UDP_SIZE)?;
     }
     Ok(resp)
+}
+
+/// Encodes a domain name into uncompressed RFC 1035 wire labels ending with root `0x00`.
+pub fn encode_domain_wire_labels(domain: &str) -> Result<Vec<u8>, DohError> {
+    let trimmed = domain.trim_matches('.');
+    if trimmed.is_empty() {
+        return Ok(vec![0]);
+    }
+    let mut out = Vec::with_capacity(trimmed.len() + 2);
+    for label in trimmed.split('.') {
+        if label.is_empty() || label.len() > 63 {
+            return Err(DohError::MalformedDnsPacket("invalid domain label length"));
+        }
+        out.push(label.len() as u8);
+        out.extend_from_slice(label.as_bytes());
+    }
+    out.push(0);
+    if out.len() > 255 {
+        return Err(DohError::MalformedDnsPacket(
+            "wire domain name exceeds 255 octets",
+        ));
+    }
+    Ok(out)
+}
+
+/// Synthesizes a local split-horizon `NOERROR` response for arbitrary resource records
+/// (including multi-record RRsets, local CNAME chains, and `NODATA` responses with `ANCOUNT = 0`).
+pub fn build_local_records_response(
+    query: &[u8],
+    answer_rrs: &[(String, u16, u32, Vec<u8>)],
+) -> Result<Vec<u8>, DohError> {
+    build_local_authoritative_response(query, RCODE_NOERROR, answer_rrs, &[], &[])
+}
+
+/// Synthesizes an authoritative local DNS response (`AA=1`) supporting `Answer`, `Authority` (e.g. RFC 2308 `SOA`),
+/// and `Additional` (e.g. in-bailiwick `A`/`AAAA` glue + EDNS0 `OPT`) sections.
+pub fn build_local_authoritative_response(
+    query: &[u8],
+    response_rcode: u8,
+    answer_rrs: &[(String, u16, u32, Vec<u8>)],
+    authority_rrs: &[(String, u16, u32, Vec<u8>)],
+    additional_rrs: &[(String, u16, u32, Vec<u8>)],
+) -> Result<Vec<u8>, DohError> {
+    let (parsed, mut resp) = init_synthetic_response(query, 0x84, response_rcode)?;
+
+    let append_rr_slice = |resp: &mut Vec<u8>,
+                           rrs: &[(String, u16, u32, Vec<u8>)]|
+     -> Result<u16, DohError> {
+        let mut count = 0u16;
+        if parsed.qclass == DNS_CLASS_IN {
+            for (owner, rr_type, ttl, rdata) in rrs {
+                if rdata.len() > u16::MAX as usize {
+                    return Err(DohError::PayloadTooLarge);
+                }
+                if owner.eq_ignore_ascii_case(&parsed.qname) {
+                    append_compressed_answer_rr(resp, *rr_type, *ttl, rdata);
+                } else {
+                    let owner_wire = encode_domain_wire_labels(owner)?;
+                    resp.extend_from_slice(&owner_wire);
+                    resp.extend_from_slice(&rr_type.to_be_bytes());
+                    resp.extend_from_slice(&DNS_CLASS_IN.to_be_bytes());
+                    resp.extend_from_slice(&ttl.to_be_bytes());
+                    resp.extend_from_slice(&(rdata.len() as u16).to_be_bytes());
+                    resp.extend_from_slice(rdata);
+                }
+                count = count.saturating_add(1);
+                if resp.len() > MAX_DNS_MESSAGE_LEN {
+                    return Err(DohError::PayloadTooLarge);
+                }
+            }
+        }
+        Ok(count)
+    };
+
+    let an_count = append_rr_slice(&mut resp, answer_rrs)?;
+    let ns_count = append_rr_slice(&mut resp, authority_rrs)?;
+    let ar_count = append_rr_slice(&mut resp, additional_rrs)?;
+
+    write_u16_be(&mut resp, 6, an_count)?;
+    write_u16_be(&mut resp, 8, ns_count)?;
+    write_u16_be(&mut resp, 10, ar_count)?;
+
+    if parsed.has_edns0 {
+        append_empty_opt_record(&mut resp, UPSTREAM_EDNS_UDP_SIZE)?;
+    }
+    Ok(resp)
+}
+
+/// Builds a minimal RFC 1035 + EDNS0 DNS query packet for internal resolution testing (`/api/v1/dns/lookup`).
+pub fn build_minimal_query_packet(
+    qname: &str,
+    qtype: u16,
+    do_bit: bool,
+) -> Result<Vec<u8>, DohError> {
+    let encoded_name = encode_domain_wire_labels(qname)?;
+    let mut pkt = Vec::with_capacity(DNS_HEADER_LEN + encoded_name.len() + 15);
+    pkt.extend_from_slice(&0x0000u16.to_be_bytes()); // ID = 0 (RFC 8484 §4.1)
+    pkt.extend_from_slice(&0x0100u16.to_be_bytes()); // Flags: RD = 1
+    pkt.extend_from_slice(&1u16.to_be_bytes()); // QDCOUNT = 1
+    pkt.extend_from_slice(&0u16.to_be_bytes()); // ANCOUNT = 0
+    pkt.extend_from_slice(&0u16.to_be_bytes()); // NSCOUNT = 0
+    pkt.extend_from_slice(&1u16.to_be_bytes()); // ARCOUNT = 1 (EDNS0 OPT)
+    pkt.extend_from_slice(&encoded_name);
+    pkt.extend_from_slice(&qtype.to_be_bytes());
+    pkt.extend_from_slice(&DNS_CLASS_IN.to_be_bytes());
+    // EDNS0 OPT record
+    pkt.push(0); // Root '.'
+    pkt.extend_from_slice(&RR_TYPE_OPT.to_be_bytes());
+    pkt.extend_from_slice(&UPSTREAM_EDNS_UDP_SIZE.to_be_bytes());
+    let edns_flags: u32 = if do_bit { 0x0000_8000 } else { 0 };
+    pkt.extend_from_slice(&edns_flags.to_be_bytes());
+    pkt.extend_from_slice(&0u16.to_be_bytes()); // RDLENGTH = 0
+    Ok(pkt)
 }
 
 /// Extracts all RFC 8914 Extended DNS Error (`EDE`, Option Code 15) entries from the `OPT` record in `packet`.

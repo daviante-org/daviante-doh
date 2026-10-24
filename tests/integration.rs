@@ -2297,3 +2297,525 @@ pub mod competitive_enhancements {
         let _ = std::fs::remove_file(block_path);
     }
 }
+
+// =============================================================================
+// Admin Control-Plane API (/api/v1/*), RBAC, CSRF, & All-29 DNS Record Types Tests
+// =============================================================================
+pub mod admin_control_plane {
+    use super::*;
+    use daviante_doh::admin::auth::AdminRole;
+    use daviante_doh::admin::crypto::hash_password_argon2id;
+    use daviante_doh::policy::{
+        format_bind_preview, validate_record_against_store, LocalDnsRecord, LocalRecordData,
+    };
+
+    #[test]
+    fn all_29_dns_record_types_compile_and_format_bind_preview() {
+        let samples: Vec<LocalRecordData> = vec![
+            LocalRecordData::A {
+                ip: "10.10.20.30".into(),
+                auto_ptr: true,
+            },
+            LocalRecordData::AAAA {
+                ip: "2001:db8::42".into(),
+                auto_ptr: true,
+            },
+            LocalRecordData::CNAME {
+                target: "target.internal.corp".into(),
+            },
+            LocalRecordData::DNAME {
+                target: "subtree.internal.corp".into(),
+            },
+            LocalRecordData::MX {
+                priority: 10,
+                target: "mail.internal.corp".into(),
+            },
+            LocalRecordData::TXT {
+                content: "v=spf1 include:internal.corp -all".into(),
+            },
+            LocalRecordData::SPF {
+                content: "v=spf1 -all".into(),
+            },
+            LocalRecordData::SRV {
+                priority: 10,
+                weight: 5,
+                port: 8443,
+                target: "api.internal.corp".into(),
+            },
+            LocalRecordData::CAA {
+                flags: 0,
+                tag: "issue".into(),
+                value: "letsencrypt.org".into(),
+            },
+            LocalRecordData::HTTPS {
+                priority: 1,
+                target: ".".into(),
+                svc_params: "alpn=\"h2,h3\" port=8443 ipv4hint=10.10.20.30".into(),
+            },
+            LocalRecordData::SVCB {
+                priority: 1,
+                target: "svc.internal.corp".into(),
+                svc_params: "alpn=\"h2\"".into(),
+            },
+            LocalRecordData::NS {
+                target: "ns1.internal.corp".into(),
+            },
+            LocalRecordData::PTR {
+                target: "host.internal.corp".into(),
+            },
+            LocalRecordData::SOA {
+                mname: "ns1.internal.corp".into(),
+                rname: "hostmaster.internal.corp".into(),
+                serial: 2026102401,
+                refresh: 3600,
+                retry: 600,
+                expire: 604800,
+                minimum: 300,
+            },
+            LocalRecordData::TLSA {
+                usage: 3,
+                selector: 1,
+                matching_type: 1,
+                cert_data: "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+                    .into(),
+            },
+            LocalRecordData::SMIMEA {
+                usage: 3,
+                selector: 1,
+                matching_type: 1,
+                cert_data: "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+                    .into(),
+            },
+            LocalRecordData::SSHFP {
+                algorithm: 4,
+                fp_type: 2,
+                fingerprint: "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+                    .into(),
+            },
+            LocalRecordData::DS {
+                key_tag: 12345,
+                algorithm: 13,
+                digest_type: 2,
+                digest: "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855".into(),
+            },
+            LocalRecordData::CDS {
+                key_tag: 12345,
+                algorithm: 13,
+                digest_type: 2,
+                digest: "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855".into(),
+            },
+            LocalRecordData::DNSKEY {
+                flags: 257,
+                protocol: 3,
+                algorithm: 13,
+                public_key: "AQIDBAUGBwg=".into(),
+            },
+            LocalRecordData::CDNSKEY {
+                flags: 257,
+                protocol: 3,
+                algorithm: 13,
+                public_key: "AQIDBAUGBwg=".into(),
+            },
+            LocalRecordData::NAPTR {
+                order: 100,
+                preference: 10,
+                flags: "s".into(),
+                service: "SIP+D2U".into(),
+                regexp: String::new(),
+                replacement: "_sip._udp.internal.corp".into(),
+            },
+            LocalRecordData::URI {
+                priority: 10,
+                weight: 1,
+                target: "https://internal.corp/svc".into(),
+            },
+            LocalRecordData::HINFO {
+                cpu: "X86-64".into(),
+                os: "LINUX".into(),
+            },
+            LocalRecordData::RP {
+                mbox: "ops.internal.corp".into(),
+                txt: "txt.internal.corp".into(),
+            },
+            LocalRecordData::LOC {
+                coordinates: "37 46 29.744 N 122 25 9.816 W 15.00m 1m 10000m 10m".into(),
+            },
+            LocalRecordData::CERT {
+                cert_type: 1,
+                key_tag: 12345,
+                algorithm: 13,
+                cert_data: "AQIDBAUGBwg=".into(),
+            },
+            LocalRecordData::OPENPGPKEY {
+                public_key: "AQIDBAUGBwg=".into(),
+            },
+            LocalRecordData::RAW {
+                rr_type: 65280,
+                rdata_hex: "c0000201".into(),
+            },
+        ];
+
+        assert_eq!(samples.len(), 29);
+        for (idx, data) in samples.into_iter().enumerate() {
+            let domain = if matches!(data, LocalRecordData::SRV { .. }) {
+                format!("_https._tcp.node-{idx}.internal.corp")
+            } else if matches!(data, LocalRecordData::PTR { .. }) {
+                format!("{idx}.20.10.10.in-addr.arpa")
+            } else {
+                format!("node-{idx}.internal.corp")
+            };
+            let rec = LocalDnsRecord {
+                id: format!("rec-{idx}"),
+                zone_id: None,
+                domain: domain.clone(),
+                data,
+                ttl: 300,
+                enabled: true,
+                comment: "unit-test".into(),
+                updated_at_epoch: 100,
+            };
+            let compiled = validate_record_against_store(&rec, &[]).unwrap();
+            assert!(!compiled.rdata.is_empty());
+            let bind_str = format_bind_preview(&rec);
+            assert!(bind_str.contains(&format!("{domain}. 300 IN")));
+
+            // Verify all 29 RR types decode cleanly to human-readable presentation format in JSON DoH
+            let q = daviante_doh::dns::wire::build_minimal_query_packet(
+                &domain,
+                compiled.rr_type,
+                false,
+            )
+            .unwrap();
+            let wire = daviante_doh::dns::wire::build_local_authoritative_response(
+                &q,
+                0,
+                &[(domain.clone(), compiled.rr_type, 300, compiled.rdata.clone())],
+                &[],
+                &[],
+            )
+            .unwrap();
+            let decoded_json = daviante_doh::dns::json::decode_wire_to_json(&wire).unwrap();
+            let ans = decoded_json.answer.expect("Answer section should be present");
+            assert_eq!(ans.len(), 1);
+            assert!(!ans[0].data.is_empty());
+        }
+    }
+
+    #[tokio::test]
+    async fn admin_api_auth_csrf_rbac_persistence_and_live_dns_lookup() {
+        let upstream_addr = start_mock_upstream(false).await;
+        let pub_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let adm_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let pub_addr = pub_listener.local_addr().unwrap();
+        let adm_addr = adm_listener.local_addr().unwrap();
+
+        let store_path = std::env::temp_dir().join(format!(
+            "daviante-doh-admin-store-{}.json",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&store_path);
+
+        let salt = b"0123456789abcdef";
+        let password_hash = hash_password_argon2id(b"S3cureAdminPass!2026", salt, 64, 2, 1).unwrap();
+
+        let cfg = DohConfig {
+            listen_address: pub_addr,
+            admin_listen_address: Some(adm_addr),
+            local_bind_address: "127.0.0.1:0".parse().unwrap(),
+            server_address: upstream_addr,
+            enable_admin_ui: true,
+            dns_store_file: Some(store_path.clone()),
+            admin_username: Some("admin".into()),
+            admin_password_hash: Some(password_hash),
+            cache_size: 256,
+            keepalive: false,
+            ..DohConfig::default()
+        };
+        let odoh_keys =
+            OdohKeyManager::spawn(tokio::runtime::Handle::current(), Duration::from_secs(3600))
+                .unwrap();
+        let engine = DohEngine::new(cfg, odoh_keys).unwrap();
+        let engine_ref = engine.clone();
+        let (tx, rx) = tokio::sync::oneshot::channel::<()>();
+        tokio::spawn(async move {
+            let _ =
+                serve_with_admin_and_shutdown(engine, pub_listener, Some(adm_listener), async {
+                    let _ = rx.await;
+                })
+                .await;
+        });
+
+        // 1. Public listener never exposes /api/v1/* (returns 404)
+        let (pub_api_hdr, _) = raw_http_request(
+            pub_addr,
+            "GET /api/v1/dns/records HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+            b"",
+        )
+        .await;
+        assert!(pub_api_hdr.starts_with("HTTP/1.1 404"));
+
+        // 2. Unauthenticated request on admin listener to /api/v1/dns/records returns 401
+        let (unauth_hdr, _) = raw_http_request(
+            adm_addr,
+            "GET /api/v1/dns/records HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+            b"",
+        )
+        .await;
+        assert!(unauth_hdr.starts_with("HTTP/1.1 401"));
+
+        // 3. Invalid login returns generic 401 "Invalid username or password."
+        let bad_login = br#"{"username":"admin","password":"wrong"}"#;
+        let (bad_hdr, bad_body) = raw_http_request(
+            adm_addr,
+            &format!(
+                "POST /api/v1/auth/login HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                bad_login.len()
+            ),
+            bad_login,
+        )
+        .await;
+        assert!(bad_hdr.starts_with("HTTP/1.1 401"));
+        let bad_json: serde_json::Value = serde_json::from_slice(&bad_body).unwrap();
+        assert_eq!(bad_json["detail"], "Invalid username or password.");
+
+        // 4. Valid login returns 200 OK + Set-Cookie + csrf_token
+        let good_login = br#"{"username":"admin","password":"S3cureAdminPass!2026"}"#;
+        let (login_hdr, login_body) = raw_http_request(
+            adm_addr,
+            &format!(
+                "POST /api/v1/auth/login HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                good_login.len()
+            ),
+            good_login,
+        )
+        .await;
+        assert!(login_hdr.starts_with("HTTP/1.1 200 OK"));
+        let cookie_line = login_hdr
+            .lines()
+            .find(|l| l.to_ascii_lowercase().starts_with("set-cookie:"))
+            .unwrap();
+        let session_cookie = cookie_line
+            .split_once(':')
+            .unwrap()
+            .1
+            .trim()
+            .split(';')
+            .next()
+            .unwrap()
+            .to_string();
+        let login_json: serde_json::Value = serde_json::from_slice(&login_body).unwrap();
+        let csrf_token = login_json["csrf_token"].as_str().unwrap().to_string();
+
+        // 5. Mutation without X-CSRF-Token is rejected with 403 Forbidden (CSRF_INVALID)
+        let rec_body = br#"{"domain":"db.internal.corp","ttl":300,"enabled":true,"comment":"primary db","record":{"type":"A","ip":"10.99.0.10","auto_ptr":true}}"#;
+        let (no_csrf_hdr, _) = raw_http_request(
+            adm_addr,
+            &format!(
+                "POST /api/v1/dns/records HTTP/1.1\r\nHost: localhost\r\nCookie: {session_cookie}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                rec_body.len()
+            ),
+            rec_body,
+        )
+        .await;
+        assert!(no_csrf_hdr.starts_with("HTTP/1.1 403"));
+
+        // 6. Create record with valid session cookie + X-CSRF-Token succeeds (201 Created)
+        let (create_hdr, create_body) = raw_http_request(
+            adm_addr,
+            &format!(
+                "POST /api/v1/dns/records HTTP/1.1\r\nHost: localhost\r\nCookie: {session_cookie}\r\nX-CSRF-Token: {csrf_token}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                rec_body.len()
+            ),
+            rec_body,
+        )
+        .await;
+        assert!(create_hdr.starts_with("HTTP/1.1 201 Created"));
+        let created_json: serde_json::Value = serde_json::from_slice(&create_body).unwrap();
+        assert_eq!(created_json["domain"], "db.internal.corp");
+        assert!(store_path.exists());
+
+        // 7. Create CNAME record at the same owner name is rejected with 409 Conflict (CNAME_CONFLICT)
+        let cname_conflict_body = br#"{"domain":"db.internal.corp","ttl":300,"enabled":true,"comment":"","record":{"type":"CNAME","target":"other.internal.corp"}}"#;
+        let (conflict_hdr, conflict_resp) = raw_http_request(
+            adm_addr,
+            &format!(
+                "POST /api/v1/dns/records HTTP/1.1\r\nHost: localhost\r\nCookie: {session_cookie}\r\nX-CSRF-Token: {csrf_token}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                cname_conflict_body.len()
+            ),
+            cname_conflict_body,
+        )
+        .await;
+        assert!(conflict_hdr.starts_with("HTTP/1.1 409 Conflict"));
+        let conflict_json: serde_json::Value = serde_json::from_slice(&conflict_resp).unwrap();
+        assert_eq!(conflict_json["error_code"], "CNAME_CONFLICT");
+
+        // 8. Live DNS Lookup via /api/v1/dns/lookup resolves db.internal.corp from local_record
+        let lookup_body = br#"{"name":"db.internal.corp","record_type":"A","do_bit":false}"#;
+        let (lk_hdr, lk_resp) = raw_http_request(
+            adm_addr,
+            &format!(
+                "POST /api/v1/dns/lookup HTTP/1.1\r\nHost: localhost\r\nCookie: {session_cookie}\r\nX-CSRF-Token: {csrf_token}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                lookup_body.len()
+            ),
+            lookup_body,
+        )
+        .await;
+        assert!(lk_hdr.starts_with("HTTP/1.1 200 OK"));
+        let lk_json: serde_json::Value = serde_json::from_slice(&lk_resp).unwrap();
+        assert_eq!(lk_json["source"], "local_store");
+        assert_eq!(lk_json["dns_json"]["Answer"][0]["data"], "10.99.0.10");
+
+        // 9. Viewer RBAC negative test: Viewer can GET records, but POST /api/v1/dns/records is denied with 403 Forbidden
+        let viewer_session = engine_ref
+            .admin_sessions()
+            .create_session("viewer-user".into(), AdminRole::Viewer, "oidc")
+            .unwrap();
+        let viewer_cookie = format!("doh_session={}", viewer_session.session_id);
+        let (v_get_hdr, _) = raw_http_request(
+            adm_addr,
+            &format!(
+                "GET /api/v1/dns/records HTTP/1.1\r\nHost: localhost\r\nCookie: {viewer_cookie}\r\nConnection: close\r\n\r\n"
+            ),
+            b"",
+        )
+        .await;
+        assert!(v_get_hdr.starts_with("HTTP/1.1 200 OK"));
+
+        let (v_post_hdr, v_post_body) = raw_http_request(
+            adm_addr,
+            &format!(
+                "POST /api/v1/dns/records HTTP/1.1\r\nHost: localhost\r\nCookie: {viewer_cookie}\r\nX-CSRF-Token: {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                viewer_session.csrf_token,
+                rec_body.len()
+            ),
+            rec_body,
+        )
+        .await;
+        assert!(v_post_hdr.starts_with("HTTP/1.1 403 Forbidden"));
+        let v_err: serde_json::Value = serde_json::from_slice(&v_post_body).unwrap();
+        assert_eq!(v_err["error_code"], "FORBIDDEN");
+
+        // 10. Create Authoritative DNS Zone (`corp.internal`) and verify relative @/subdomain records,
+        // SOA in Authority on NXDOMAIN/NODATA, A/AAAA Glue in Additional, DNAME subtree redirection,
+        // QTYPE=ANY, BIND export/import, and Telemetry Activity / Audit Trail.
+        let zone_body = br#"{"name":"corp.internal","mode":"authoritative","primary_ns":"ns1.corp.internal","admin_email":"dnsops.corp.internal","default_ttl":300,"enabled":true,"comment":"Primary internal zone"}"#;
+        let (z_hdr, z_resp) = raw_http_request(
+            adm_addr,
+            &format!(
+                "POST /api/v1/dns/zones HTTP/1.1\r\nHost: localhost\r\nCookie: {session_cookie}\r\nX-CSRF-Token: {csrf_token}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                zone_body.len()
+            ),
+            zone_body,
+        )
+        .await;
+        assert!(z_hdr.starts_with("HTTP/1.1 201 Created"));
+        let z_json: serde_json::Value = serde_json::from_slice(&z_resp).unwrap();
+        let zone_id = z_json["id"].as_str().unwrap().to_string();
+        assert_eq!(z_json["name"], "corp.internal");
+        assert_eq!(z_json["mode"], "authoritative");
+
+        // Create relative `@`, `mail` (A), `@` (MX -> mail.corp.internal), and `legacy` (DNAME -> corp.internal) via BIND Import
+        let bind_import_payload = serde_json::json!({
+            "zone_id": zone_id,
+            "dry_run": false,
+            "content": "$TTL 300\n@ IN A 10.50.0.1\nmail IN A 10.50.0.25\n@ IN MX 10 mail.corp.internal.\nlegacy IN DNAME corp.internal.\n"
+        })
+        .to_string();
+        let (imp_hdr, imp_resp) = raw_http_request(
+            adm_addr,
+            &format!(
+                "POST /api/v1/dns/records/import HTTP/1.1\r\nHost: localhost\r\nCookie: {session_cookie}\r\nX-CSRF-Token: {csrf_token}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                bind_import_payload.len()
+            ),
+            bind_import_payload.as_bytes(),
+        )
+        .await;
+        assert!(imp_hdr.starts_with("HTTP/1.1 200 OK"));
+        let imp_json: serde_json::Value = serde_json::from_slice(&imp_resp).unwrap();
+        assert_eq!(imp_json["imported_count"], 4);
+
+        // Query MX on corp.internal -> Answer has MX, Additional has in-bailiwick A glue for mail.corp.internal
+        let mx_lk_body = br#"{"name":"corp.internal","record_type":"MX","do_bit":false}"#;
+        let (mx_hdr, mx_resp) = raw_http_request(
+            adm_addr,
+            &format!(
+                "POST /api/v1/dns/lookup HTTP/1.1\r\nHost: localhost\r\nCookie: {session_cookie}\r\nX-CSRF-Token: {csrf_token}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                mx_lk_body.len()
+            ),
+            mx_lk_body,
+        )
+        .await;
+        assert!(mx_hdr.starts_with("HTTP/1.1 200 OK"));
+        let mx_json: serde_json::Value = serde_json::from_slice(&mx_resp).unwrap();
+        assert_eq!(mx_json["dns_json"]["Answer"][0]["data"], "10 mail.corp.internal");
+        assert_eq!(mx_json["dns_json"]["Additional"][0]["name"], "mail.corp.internal");
+        assert_eq!(mx_json["dns_json"]["Additional"][0]["data"], "10.50.0.25");
+
+        // Query DNAME subtree (`mail.legacy.corp.internal` A) -> DNAME + synthesized CNAME + final A (10.50.0.25)
+        let dname_lk_body = br#"{"name":"mail.legacy.corp.internal","record_type":"A","do_bit":false}"#;
+        let (_, dname_resp) = raw_http_request(
+            adm_addr,
+            &format!(
+                "POST /api/v1/dns/lookup HTTP/1.1\r\nHost: localhost\r\nCookie: {session_cookie}\r\nX-CSRF-Token: {csrf_token}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                dname_lk_body.len()
+            ),
+            dname_lk_body,
+        )
+        .await;
+        let dname_json: serde_json::Value = serde_json::from_slice(&dname_resp).unwrap();
+        let dname_answers = dname_json["dns_json"]["Answer"].as_array().unwrap();
+        assert_eq!(dname_answers.len(), 3);
+        assert_eq!(dname_answers[0]["type"], 39); // DNAME
+        assert_eq!(dname_answers[1]["type"], 5);  // Synthesized CNAME
+        assert_eq!(dname_answers[2]["data"], "10.50.0.25");
+
+        // Query non-existent name in Authoritative zone (`missing.corp.internal`) -> local NXDOMAIN (3) + SOA in Authority
+        let nx_lk_body = br#"{"name":"missing.corp.internal","record_type":"A","do_bit":false}"#;
+        let (_, nx_resp) = raw_http_request(
+            adm_addr,
+            &format!(
+                "POST /api/v1/dns/lookup HTTP/1.1\r\nHost: localhost\r\nCookie: {session_cookie}\r\nX-CSRF-Token: {csrf_token}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                nx_lk_body.len()
+            ),
+            nx_lk_body,
+        )
+        .await;
+        let nx_json: serde_json::Value = serde_json::from_slice(&nx_resp).unwrap();
+        assert_eq!(nx_json["status_rcode"], 3);
+        assert_eq!(nx_json["source"], "local_store");
+        assert_eq!(nx_json["dns_json"]["Authority"][0]["type"], 6); // SOA
+
+        // Export zone to RFC 1035 BIND format
+        let (exp_hdr, exp_resp) = raw_http_request(
+            adm_addr,
+            &format!(
+                "GET /api/v1/dns/zones/{zone_id}/export HTTP/1.1\r\nHost: localhost\r\nCookie: {session_cookie}\r\nConnection: close\r\n\r\n"
+            ),
+            b"",
+        )
+        .await;
+        assert!(exp_hdr.starts_with("HTTP/1.1 200 OK"));
+        let exp_json: serde_json::Value = serde_json::from_slice(&exp_resp).unwrap();
+        let bind_text = exp_json["bind_zone_text"].as_str().unwrap();
+        assert!(bind_text.contains("$ORIGIN corp.internal."));
+        assert!(bind_text.contains("IN SOA ns1.corp.internal."));
+
+        // Verify Telemetry Activity & Admin Audit endpoint
+        let (act_hdr, act_resp) = raw_http_request(
+            adm_addr,
+            &format!(
+                "GET /api/v1/telemetry/activity HTTP/1.1\r\nHost: localhost\r\nCookie: {session_cookie}\r\nConnection: close\r\n\r\n"
+            ),
+            b"",
+        )
+        .await;
+        assert!(act_hdr.starts_with("HTTP/1.1 200 OK"));
+        let act_json: serde_json::Value = serde_json::from_slice(&act_resp).unwrap();
+        assert!(!act_json["dns_activity"].as_array().unwrap().is_empty());
+        assert!(!act_json["admin_audit"].as_array().unwrap().is_empty());
+
+        let _ = tx.send(());
+        let _ = std::fs::remove_file(store_path);
+    }
+}
+

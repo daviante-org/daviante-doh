@@ -1,18 +1,22 @@
 openapi: 3.1.0
 info:
-  title: daviante-doh DNS-over-HTTPS, Oblivious DoH, & JSON DoH API
+  title: daviante-doh DNS-over-HTTPS, Oblivious DoH, JSON DoH & Admin Control-Plane API
   version: 0.2.0
   summary: >-
     Standards-compliant DNS-over-HTTPS (RFC 8484), Oblivious DoH (RFC 9230),
-    and JSON DoH (application/dns-json) server by Daviante.
+    JSON DoH (application/dns-json), and Split-Horizon Local DNS Control-Plane server by Daviante.
   description: |
     `daviante-doh` is an ultra-lightweight, memory-safe (`#![forbid(unsafe_code)]`) DNS-over-HTTPS (DoH),
-    Oblivious DoH (ODoH), and JSON DoH server engineered by [Daviante](https://daviante.org).
+    Oblivious DoH (ODoH), JSON DoH, and Local DNS Control-Plane server engineered by [Daviante](https://daviante.org).
 
     ### Supported Protocols on `/dns-query`
     1. **RFC 8484 Wireformat DoH (`application/dns-message`)** — `GET ?dns=<base64url>` and `POST` binary DNS wire packets.
     2. **Google / Cloudflare JSON DoH (`application/dns-json`)** — `GET ?name=<domain>&type=<rrtype>&do=<bool>&cd=<bool>`.
     3. **RFC 9230 Oblivious DoH (`application/oblivious-dns-message`)** — `POST` HPKE-encrypted queries (`KEM: X25519HkdfSha256`, `KDF: HkdfSha256`, `AEAD: Aes128Gcm`).
+
+    ### Isolated Admin Control-Plane (`/api/v1/*` on `--admin-listen-address`)
+    - Supports all 29 standard IANA DNS Resource Record types (`A`, `AAAA`, `CNAME`, `DNAME`, `MX`, `TXT`, `SPF`, `SRV`, `CAA`, `HTTPS`, `SVCB`, `NS`, `PTR`, `SOA`, `TLSA`, `SMIMEA`, `SSHFP`, `DS`, `CDS`, `DNSKEY`, `CDNSKEY`, `NAPTR`, `URI`, `HINFO`, `RP`, `LOC`, `CERT`, `OPENPGPKEY`, `RAW`).
+    - Dual Authentication: Local Admin (`Argon2id` PHC verification) and Keycloak OIDC (`Authorization Code + PKCE S256` with `RS256` JWKS verification and RBAC role mapping `Admin` / `Viewer`).
   contact:
     name: Daviante Engineering
     url: https://daviante.org
@@ -24,6 +28,8 @@ info:
 servers:
   - url: http://localhost:3000
     description: Local development / container HTTP listener
+  - url: http://127.0.0.1:9090
+    description: Isolated Admin Control-Plane listener (--admin-listen-address)
   - url: https://doh.example.com
     description: Production HTTPS listener (HTTP/2 + HTTP/1.1)
 
@@ -34,6 +40,8 @@ tags:
     description: RFC 9230 HPKE Key Configuration discovery endpoint
   - name: Operations & Observability
     description: Kubernetes / OpenShift liveness, readiness, and Prometheus metrics endpoints
+  - name: Admin Control-Plane
+    description: Authenticated Local DNS Records, Protective Policy, Live DNS Lookup, and Telemetry endpoints (/api/v1/*)
 
 paths:
   /dns-query:
@@ -296,8 +304,195 @@ paths:
               schema:
                 type: string
 
+  /api/v1/auth/session:
+    get:
+      tags:
+        - Admin Control-Plane
+      operationId: getAdminSession
+      summary: Retrieve current admin authentication session status and CSRF token
+      responses:
+        "200":
+          description: Current session state.
+
+  /api/v1/auth/login:
+    post:
+      tags:
+        - Admin Control-Plane
+      operationId: loginAdminLocal
+      summary: Authenticate with local admin username and password (Argon2id)
+      responses:
+        "200":
+          description: Session established (`Set-Cookie: __Host-doh_session` or `doh_session`).
+        "401":
+          description: Invalid username or password.
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/ProblemDetails"
+        "429":
+          description: Brute-force rate limit exceeded.
+
+  /api/v1/auth/logout:
+    post:
+      tags:
+        - Admin Control-Plane
+      operationId: logoutAdmin
+      summary: Revoke active admin session and clear session cookie
+      responses:
+        "200":
+          description: Logged out.
+
+  /api/v1/dns/records:
+    get:
+      tags:
+        - Admin Control-Plane
+      operationId: listLocalDnsRecords
+      summary: List paginated local DNS records (max 100 per page)
+      responses:
+        "200":
+          description: Paginated local DNS records.
+    post:
+      tags:
+        - Admin Control-Plane
+      operationId: createLocalDnsRecord
+      summary: Create a new local DNS record (Admin role required)
+      responses:
+        "201":
+          description: Created local DNS record and invalidated matching DNS cache entries.
+        "409":
+          description: CNAME exclusivity conflict (RFC 2181 §10.1) or duplicate record.
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/ProblemDetails"
+        "422":
+          description: Record validation or CNAME loop failure.
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/ProblemDetails"
+
+  /api/v1/dns/records/preview:
+    post:
+      tags:
+        - Admin Control-Plane
+      operationId: previewLocalDnsRecord
+      summary: Validate a candidate DNS record and return its BIND zone line and compiled wire RDATA size
+      responses:
+        "200":
+          description: Validated BIND preview.
+
+  /api/v1/dns/records/{id}:
+    put:
+      tags:
+        - Admin Control-Plane
+      operationId: updateLocalDnsRecord
+      summary: Update an existing local DNS record by ID (Admin role required)
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Updated local DNS record.
+    delete:
+      tags:
+        - Admin Control-Plane
+      operationId: deleteLocalDnsRecord
+      summary: Delete a local DNS record by ID (Admin role required)
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Deleted local DNS record.
+
+  /api/v1/policy/rules:
+    get:
+      tags:
+        - Admin Control-Plane
+      operationId: listPolicyRules
+      summary: List paginated protective DNS allowlist or blocklist rules
+      responses:
+        "200":
+          description: Paginated policy rules.
+    post:
+      tags:
+        - Admin Control-Plane
+      operationId: createPolicyRule
+      summary: Create a protective DNS allowlist or blocklist rule (Admin role required)
+      responses:
+        "201":
+          description: Created policy rule.
+
+  /api/v1/policy/settings:
+    get:
+      tags:
+        - Admin Control-Plane
+      operationId: getPolicySettings
+      summary: Retrieve protective DNS block action and private IP rebinding settings
+      responses:
+        "200":
+          description: Current policy settings.
+    put:
+      tags:
+        - Admin Control-Plane
+      operationId: updatePolicySettings
+      summary: Update protective DNS block action and private IP rebinding settings (Admin role required)
+      responses:
+        "200":
+          description: Updated policy settings.
+
+  /api/v1/dns/lookup:
+    post:
+      tags:
+        - Admin Control-Plane
+      operationId: executeAdminDnsLookup
+      summary: Execute a live DNS resolution test against the local store, policy engine, cache, and upstreams
+      responses:
+        "200":
+          description: DNS resolution result with source attribution and RFC 8427 JSON representation.
+
+  /api/v1/telemetry/summary:
+    get:
+      tags:
+        - Admin Control-Plane
+      operationId: getTelemetrySummary
+      summary: Retrieve structured JSON telemetry counters and upstream circuit-breaker health
+      responses:
+        "200":
+          description: Telemetry summary.
+
 components:
   schemas:
+    ProblemDetails:
+      type: object
+      required:
+        - type
+        - title
+        - status
+        - detail
+        - error_code
+      properties:
+        type:
+          type: string
+          examples:
+            - urn:daviante-doh:error:CNAME_CONFLICT
+        title:
+          type: string
+        status:
+          type: integer
+        detail:
+          type: string
+        error_code:
+          type: string
+        field:
+          type: string
     DnsJsonResponse:
       type: object
       required:

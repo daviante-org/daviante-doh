@@ -8,6 +8,7 @@
 #![forbid(unsafe_code)]
 #![cfg_attr(not(test), deny(clippy::unwrap_used))]
 
+pub mod admin;
 pub mod cache;
 #[cfg(feature = "cli")]
 #[doc(hidden)]
@@ -91,7 +92,7 @@ impl ClientIpLogMode {
 /// All optional enterprise features (caching, Prometheus `/metrics`, dedicated admin listener,
 /// Protective DNS domain filtering, `ANY` blocking, rate limiting, per-IP connection limits,
 /// trusted proxy headers, and query audit logging) are **disabled by default** unless explicitly enabled.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct DohConfig {
     pub listen_address: SocketAddr,
     pub admin_listen_address: Option<SocketAddr>,
@@ -131,6 +132,7 @@ pub struct DohConfig {
     pub allowlist_file: Option<PathBuf>,
     pub blocklist_file: Option<PathBuf>,
     pub hosts_file: Option<PathBuf>,
+    pub dns_store_file: Option<PathBuf>,
     pub block_action: BlockAction,
     pub block_private_rebinding: bool,
     pub rate_limit_rps: u32,
@@ -139,10 +141,97 @@ pub struct DohConfig {
     pub cors_allow_origin: String,
     pub log_queries: bool,
     pub log_client_ip: ClientIpLogMode,
+    pub enable_admin_ui: bool,
+    pub admin_ui_dir: Option<PathBuf>,
+    pub admin_username: Option<String>,
+    pub admin_password_hash: Option<String>,
+    pub oidc_issuer_url: Option<String>,
+    pub oidc_client_id: Option<String>,
+    pub oidc_client_secret: Option<String>,
+    pub oidc_redirect_uri: Option<String>,
+    pub oidc_admin_role: String,
+    pub oidc_viewer_role: String,
     pub tls_cert_path: Option<PathBuf>,
     pub tls_cert_key_path: Option<PathBuf>,
     #[cfg(feature = "tls")]
     pub tls_min_version: TlsMinVersion,
+}
+
+impl std::fmt::Debug for DohConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let mut s = f.debug_struct("DohConfig");
+        s.field("listen_address", &self.listen_address)
+            .field("admin_listen_address", &self.admin_listen_address)
+            .field("local_bind_address", &self.local_bind_address)
+            .field("server_address", &self.server_address)
+            .field("upstream_addresses", &self.upstream_addresses)
+            .field("trusted_proxies", &self.trusted_proxies)
+            .field("path", &self.path)
+            .field("odoh_configs_path", &self.odoh_configs_path)
+            .field("health_path", &self.health_path)
+            .field("enable_metrics", &self.enable_metrics)
+            .field("metrics_path", &self.metrics_path)
+            .field("max_clients", &self.max_clients)
+            .field("max_conns_per_ip", &self.max_conns_per_ip)
+            .field("max_concurrent_streams", &self.max_concurrent_streams)
+            .field("timeout", &self.timeout)
+            .field("shutdown_grace_period", &self.shutdown_grace_period)
+            .field("min_ttl", &self.min_ttl)
+            .field("max_ttl", &self.max_ttl)
+            .field("err_ttl", &self.err_ttl)
+            .field("stale_if_error_secs", &self.stale_if_error_secs)
+            .field(
+                "stale_while_revalidate_secs",
+                &self.stale_while_revalidate_secs,
+            )
+            .field("cache_size", &self.cache_size)
+            .field("serve_stale_ttl", &self.serve_stale_ttl)
+            .field("cache_prefetch", &self.cache_prefetch)
+            .field("coalesce_queries", &self.coalesce_queries)
+            .field("upstream_strategy", &self.upstream_strategy)
+            .field("upstream_dot_sni", &self.upstream_dot_sni)
+            .field("keepalive", &self.keepalive)
+            .field("disable_post", &self.disable_post)
+            .field("allow_odoh_post", &self.allow_odoh_post)
+            .field("disable_any", &self.disable_any)
+            .field("enable_ecs", &self.enable_ecs)
+            .field("ecs_prefix_v4", &self.ecs_prefix_v4)
+            .field("ecs_prefix_v6", &self.ecs_prefix_v6)
+            .field("odoh_rotation_secs", &self.odoh_rotation_secs)
+            .field("allowlist_file", &self.allowlist_file)
+            .field("blocklist_file", &self.blocklist_file)
+            .field("hosts_file", &self.hosts_file)
+            .field("dns_store_file", &self.dns_store_file)
+            .field("block_action", &self.block_action)
+            .field("block_private_rebinding", &self.block_private_rebinding)
+            .field("rate_limit_rps", &self.rate_limit_rps)
+            .field("rate_limit_burst", &self.rate_limit_burst)
+            .field("rate_limit_v6_prefix", &self.rate_limit_v6_prefix)
+            .field("cors_allow_origin", &self.cors_allow_origin)
+            .field("log_queries", &self.log_queries)
+            .field("log_client_ip", &self.log_client_ip)
+            .field("enable_admin_ui", &self.enable_admin_ui)
+            .field("admin_ui_dir", &self.admin_ui_dir)
+            .field("admin_username", &self.admin_username)
+            .field(
+                "admin_password_hash",
+                &self.admin_password_hash.as_ref().map(|_| "[REDACTED]"),
+            )
+            .field("oidc_issuer_url", &self.oidc_issuer_url)
+            .field("oidc_client_id", &self.oidc_client_id)
+            .field(
+                "oidc_client_secret",
+                &self.oidc_client_secret.as_ref().map(|_| "[REDACTED]"),
+            )
+            .field("oidc_redirect_uri", &self.oidc_redirect_uri)
+            .field("oidc_admin_role", &self.oidc_admin_role)
+            .field("oidc_viewer_role", &self.oidc_viewer_role)
+            .field("tls_cert_path", &self.tls_cert_path)
+            .field("tls_cert_key_path", &self.tls_cert_key_path);
+        #[cfg(feature = "tls")]
+        s.field("tls_min_version", &self.tls_min_version);
+        s.finish()
+    }
 }
 
 impl Default for DohConfig {
@@ -186,6 +275,7 @@ impl Default for DohConfig {
             allowlist_file: None,
             blocklist_file: None,
             hosts_file: None,
+            dns_store_file: None,
             block_action: BlockAction::Nxdomain,
             block_private_rebinding: false,
             rate_limit_rps: 0,
@@ -194,6 +284,16 @@ impl Default for DohConfig {
             cors_allow_origin: "*".to_string(),
             log_queries: false,
             log_client_ip: ClientIpLogMode::None,
+            enable_admin_ui: false,
+            admin_ui_dir: None,
+            admin_username: None,
+            admin_password_hash: None,
+            oidc_issuer_url: None,
+            oidc_client_id: None,
+            oidc_client_secret: None,
+            oidc_redirect_uri: None,
+            oidc_admin_role: "doh-admin".to_string(),
+            oidc_viewer_role: "doh-viewer".to_string(),
             tls_cert_path: None,
             tls_cert_key_path: None,
             #[cfg(feature = "tls")]
@@ -270,6 +370,40 @@ impl DohConfig {
                 self.cors_allow_origin
             )));
         }
+        if self.enable_admin_ui {
+            let has_local = self
+                .admin_username
+                .as_ref()
+                .is_some_and(|u| !u.trim().is_empty())
+                && self
+                    .admin_password_hash
+                    .as_ref()
+                    .is_some_and(|h| !h.trim().is_empty());
+            let has_oidc = self
+                .oidc_issuer_url
+                .as_ref()
+                .is_some_and(|u| !u.trim().is_empty())
+                && self
+                    .oidc_client_id
+                    .as_ref()
+                    .is_some_and(|c| !c.trim().is_empty())
+                && self
+                    .oidc_redirect_uri
+                    .as_ref()
+                    .is_some_and(|r| !r.trim().is_empty());
+            if !has_local && !has_oidc {
+                return Err(DohError::InvalidConfig(
+                    "enable_admin_ui requires either (--admin-username and --admin-password-hash) or (--oidc-issuer-url, --oidc-client-id, and --oidc-redirect-uri)".into(),
+                ));
+            }
+            if let Some(ref phc) = self.admin_password_hash {
+                if !phc.trim().is_empty() && !phc.trim().starts_with("$argon2id$v=19$") {
+                    return Err(DohError::InvalidConfig(
+                        "admin_password_hash must be an Argon2id v19 PHC string ($argon2id$v=19$...)".into(),
+                    ));
+                }
+            }
+        }
         Ok(())
     }
 
@@ -300,7 +434,7 @@ impl Service<Request<Incoming>> for ConnectionHandler {
         let admin_only = self.admin_only;
         Box::pin(async move {
             if admin_only {
-                engine.handle_admin_request(req).await
+                engine.handle_admin_request_with_peer(req, peer_addr).await
             } else {
                 engine.handle_request(req, peer_addr).await
             }

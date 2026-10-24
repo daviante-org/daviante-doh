@@ -350,13 +350,16 @@ fn decode_rr_section(
                 std::net::Ipv6Addr::from(v6_octets).to_string()
             }
             2 | 5 | 12 | 39 => decode_name_escaped(packet, offset)?.0,
+            13 => decode_hinfo_rdata(packet, offset, rdata_end),
             15 if rdlen >= 2 => {
                 let pref = read_u16_be(packet, offset)?;
                 let (exchange, _) = decode_name_escaped(packet, offset + 2)?;
                 format!("{pref} {exchange}")
             }
             16 | 99 => decode_txt_rdata(packet, offset, rdata_end),
+            17 => decode_rp_rdata(packet, offset, rdata_end)?,
             RR_TYPE_SOA => decode_soa_rdata(packet, offset, rdata_end)?,
+            29 if rdlen == 16 => decode_loc_rdata(packet, offset, rdata_end),
             33 if rdlen >= 6 => {
                 let prio = read_u16_be(packet, offset)?;
                 let weight = read_u16_be(packet, offset + 2)?;
@@ -364,7 +367,15 @@ fn decode_rr_section(
                 let (target, _) = decode_name_escaped(packet, offset + 6)?;
                 format!("{prio} {weight} {port} {target}")
             }
-            43 if rdlen >= 4 => {
+            35 if rdlen >= 7 => decode_naptr_rdata(packet, offset, rdata_end)?,
+            37 if rdlen >= 5 => {
+                let ctype = read_u16_be(packet, offset)?;
+                let key_tag = read_u16_be(packet, offset + 2)?;
+                let alg = packet[offset + 4];
+                let cert_b64 = BASE64_STANDARD.encode(&packet[offset + 5..rdata_end]);
+                format!("{ctype} {key_tag} {alg} {cert_b64}")
+            }
+            43 | 59 if rdlen >= 4 => {
                 let key_tag = read_u16_be(packet, offset)?;
                 let alg = packet[offset + 2];
                 let digest_type = packet[offset + 3];
@@ -377,19 +388,28 @@ fn decode_rr_section(
                 let fp_hex = format_hex(&packet[offset + 2..rdata_end]);
                 format!("{alg} {fp_type} {fp_hex}")
             }
-            48 if rdlen >= 4 => {
+            48 | 60 if rdlen >= 4 => {
                 let flags = read_u16_be(packet, offset)?;
                 let proto = packet[offset + 2];
                 let alg = packet[offset + 3];
                 let pk_b64 = BASE64_STANDARD.encode(&packet[offset + 4..rdata_end]);
                 format!("{flags} {proto} {alg} {pk_b64}")
             }
-            52 if rdlen >= 3 => {
+            52 | 53 if rdlen >= 3 => {
                 let usage = packet[offset];
                 let selector = packet[offset + 1];
                 let mtype = packet[offset + 2];
                 let cert_hex = format_hex(&packet[offset + 3..rdata_end]);
                 format!("{usage} {selector} {mtype} {cert_hex}")
+            }
+            61 if rdlen >= 1 => BASE64_STANDARD.encode(&packet[offset..rdata_end]),
+            64 | 65 if rdlen >= 3 => decode_svcb_rdata(packet, offset, rdata_end)
+                .unwrap_or_else(|_| format_rfc3597_rdata(&packet[offset..rdata_end])),
+            256 if rdlen >= 4 => {
+                let prio = read_u16_be(packet, offset).unwrap_or(0);
+                let weight = read_u16_be(packet, offset + 2).unwrap_or(0);
+                let uri_str = String::from_utf8_lossy(&packet[offset + 4..rdata_end]);
+                format!("{prio} {weight} \"{uri_str}\"")
             }
             257 if rdlen >= 2 => decode_caa_rdata(packet, offset, rdata_end),
             _ => format_rfc3597_rdata(&packet[offset..rdata_end]),
@@ -422,6 +442,171 @@ fn decode_txt_rdata(packet: &[u8], offset: usize, rdata_end: usize) -> String {
         pos += slen;
     }
     out
+}
+
+fn decode_hinfo_rdata(packet: &[u8], offset: usize, rdata_end: usize) -> String {
+    if offset >= rdata_end {
+        return format_rfc3597_rdata(&packet[offset..rdata_end]);
+    }
+    let cpu_len = packet[offset] as usize;
+    let cpu_end = offset + 1 + cpu_len;
+    if cpu_end >= rdata_end {
+        return format_rfc3597_rdata(&packet[offset..rdata_end]);
+    }
+    let os_len = packet[cpu_end] as usize;
+    let os_end = cpu_end + 1 + os_len;
+    if os_end > rdata_end {
+        return format_rfc3597_rdata(&packet[offset..rdata_end]);
+    }
+    let cpu = String::from_utf8_lossy(&packet[offset + 1..cpu_end]);
+    let os = String::from_utf8_lossy(&packet[cpu_end + 1..os_end]);
+    format!("\"{cpu}\" \"{os}\"")
+}
+
+fn decode_rp_rdata(packet: &[u8], offset: usize, rdata_end: usize) -> Result<String, DohError> {
+    let (mbox, p1) = decode_name_escaped(packet, offset)?;
+    if p1 >= rdata_end {
+        return Ok(format_rfc3597_rdata(&packet[offset..rdata_end]));
+    }
+    let (txt, _) = decode_name_escaped(packet, p1)?;
+    Ok(format!("{mbox} {txt}"))
+}
+
+fn decode_loc_rdata(packet: &[u8], offset: usize, rdata_end: usize) -> String {
+    if offset + 16 > rdata_end || packet[offset] != 0 {
+        return format_rfc3597_rdata(&packet[offset..rdata_end]);
+    }
+    let lat_raw = read_u32_be(packet, offset + 4).unwrap_or(1u32 << 31);
+    let lon_raw = read_u32_be(packet, offset + 8).unwrap_or(1u32 << 31);
+    let alt_raw = read_u32_be(packet, offset + 12).unwrap_or(10_000_000);
+
+    let fmt_dms = |raw: u32, pos_c: char, neg_c: char| -> String {
+        let eq = 1u32 << 31;
+        let (diff, hem) = if raw >= eq {
+            (raw - eq, pos_c)
+        } else {
+            (eq - raw, neg_c)
+        };
+        let deg = diff / 3_600_000;
+        let rem = diff % 3_600_000;
+        let min = rem / 60_000;
+        let ms = rem % 60_000;
+        format!("{deg} {min} {:02}.{:03} {hem}", ms / 1000, ms % 1000)
+    };
+
+    let alt_m = (alt_raw as f64 / 100.0) - 100_000.0;
+    format!(
+        "{} {} {:.2}m",
+        fmt_dms(lat_raw, 'N', 'S'),
+        fmt_dms(lon_raw, 'E', 'W'),
+        alt_m
+    )
+}
+
+fn decode_naptr_rdata(packet: &[u8], offset: usize, rdata_end: usize) -> Result<String, DohError> {
+    let order = read_u16_be(packet, offset)?;
+    let pref = read_u16_be(packet, offset + 2)?;
+    let mut pos = offset + 4;
+
+    let read_cstr = |pos: &mut usize| -> Option<String> {
+        if *pos >= rdata_end {
+            return None;
+        }
+        let len = packet[*pos] as usize;
+        *pos += 1;
+        if *pos + len > rdata_end {
+            return None;
+        }
+        let s = String::from_utf8_lossy(&packet[*pos..*pos + len]).to_string();
+        *pos += len;
+        Some(s)
+    };
+
+    let Some(flags) = read_cstr(&mut pos) else {
+        return Ok(format_rfc3597_rdata(&packet[offset..rdata_end]));
+    };
+    let Some(service) = read_cstr(&mut pos) else {
+        return Ok(format_rfc3597_rdata(&packet[offset..rdata_end]));
+    };
+    let Some(regexp) = read_cstr(&mut pos) else {
+        return Ok(format_rfc3597_rdata(&packet[offset..rdata_end]));
+    };
+    if pos >= rdata_end {
+        return Ok(format_rfc3597_rdata(&packet[offset..rdata_end]));
+    }
+    let (replacement, _) = decode_name_escaped(packet, pos)?;
+    let rep_display = if replacement.is_empty() {
+        ".".to_string()
+    } else {
+        format!("{replacement}.")
+    };
+    Ok(format!(
+        "{order} {pref} \"{flags}\" \"{service}\" \"{regexp}\" {rep_display}"
+    ))
+}
+
+fn decode_svcb_rdata(packet: &[u8], offset: usize, rdata_end: usize) -> Result<String, DohError> {
+    let prio = read_u16_be(packet, offset)?;
+    let (target_raw, mut pos) = decode_name_escaped(packet, offset + 2)?;
+    let target = if target_raw.is_empty() {
+        ".".to_string()
+    } else {
+        format!("{target_raw}.")
+    };
+    let mut params = Vec::new();
+    while pos + 4 <= rdata_end {
+        let key = read_u16_be(packet, pos)?;
+        let vlen = read_u16_be(packet, pos + 2)? as usize;
+        pos += 4;
+        if pos + vlen > rdata_end {
+            break;
+        }
+        let val = &packet[pos..pos + vlen];
+        pos += vlen;
+        match key {
+            1 => {
+                let mut alpns = Vec::new();
+                let mut i = 0usize;
+                while i < val.len() {
+                    let plen = val[i] as usize;
+                    i += 1;
+                    if i + plen <= val.len() {
+                        alpns.push(String::from_utf8_lossy(&val[i..i + plen]).to_string());
+                    }
+                    i += plen;
+                }
+                params.push(format!("alpn=\"{}\"", alpns.join(",")));
+            }
+            2 => params.push("no-default-alpn".to_string()),
+            3 if val.len() == 2 => {
+                let port = u16::from_be_bytes([val[0], val[1]]);
+                params.push(format!("port={port}"));
+            }
+            4 if val.len().is_multiple_of(4) => {
+                let mut ips = Vec::new();
+                for &chunk in val.as_chunks::<4>().0 {
+                    ips.push(std::net::Ipv4Addr::from(chunk).to_string());
+                }
+                params.push(format!("ipv4hint={}", ips.join(",")));
+            }
+            5 => {
+                params.push(format!("ech={}", BASE64_STANDARD.encode(val)));
+            }
+            6 if val.len().is_multiple_of(16) => {
+                let mut ips = Vec::new();
+                for &chunk in val.as_chunks::<16>().0 {
+                    ips.push(std::net::Ipv6Addr::from(chunk).to_string());
+                }
+                params.push(format!("ipv6hint={}", ips.join(",")));
+            }
+            _ => params.push(format!("key{key}={}", format_hex(val))),
+        }
+    }
+    if params.is_empty() {
+        Ok(format!("{prio} {target}"))
+    } else {
+        Ok(format!("{prio} {target} {}", params.join(" ")))
+    }
 }
 
 fn decode_soa_rdata(packet: &[u8], offset: usize, rdata_end: usize) -> Result<String, DohError> {

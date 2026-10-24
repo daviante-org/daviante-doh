@@ -1,6 +1,18 @@
 # syntax=docker/dockerfile:1
 # =============================================================================
-# Stage 1: Build & Test daviante-doh (by Daviante - https://daviante.org)
+# Stage 1: Build PatternFly 6 Admin Control-Plane SPA (ui/)
+# =============================================================================
+FROM node:22-alpine AS ui-builder
+
+WORKDIR /ui
+COPY ui/package.json ui/package-lock.json ./
+RUN npm ci --no-audit --no-fund
+COPY ui/tsconfig.json ui/vite.config.ts ui/eslint.config.mjs ui/index.html ./
+COPY ui/src ./src
+RUN npm run build
+
+# =============================================================================
+# Stage 2: Build & Test daviante-doh (by Daviante - https://daviante.org)
 # =============================================================================
 FROM rust@sha256:557a94c82b485a14b569120e00867267108c734efe33f10cc31ca0cd5dd1eca9 AS builder
 
@@ -25,12 +37,12 @@ RUN if [ "$RUN_TESTS" = "true" ]; then \
     fi
 
 # =============================================================================
-# Stage 2: Hardened Alpine 3.24 Runtime (Docker / Podman / K8s / OpenShift)
+# Stage 3: Hardened Alpine 3.24 Runtime (Docker / Podman / K8s / OpenShift)
 # =============================================================================
 FROM alpine@sha256:294b683cb724975bec92580e1e685676bd4b50bda910ddb8c51d4cabeaec77e6 AS runtime
 
 LABEL org.opencontainers.image.title="daviante-doh" \
-      org.opencontainers.image.description="Lightweight, 100% configurable DoH (RFC 8484), ODoH (RFC 9230), and JSON DoH server by Daviante (daviante.org)" \
+      org.opencontainers.image.description="Lightweight, 100% configurable DoH (RFC 8484), ODoH (RFC 9230), JSON DoH, and Local DNS Control-Plane server by Daviante (daviante.org)" \
       org.opencontainers.image.vendor="Daviante" \
       org.opencontainers.image.url="https://daviante.org" \
       org.opencontainers.image.source="https://github.com/daviante-org/daviante-doh" \
@@ -38,9 +50,10 @@ LABEL org.opencontainers.image.title="daviante-doh" \
 
 RUN apk add --no-cache ca-certificates && \
     adduser -D -u 10001 -G root -h /etc/daviante-doh -s /sbin/nologin daviante-doh && \
-    mkdir -p /etc/daviante-doh/certs
+    mkdir -p /etc/daviante-doh/certs /etc/daviante-doh/ui /etc/daviante-doh/data
 
 COPY --from=builder /build/target/release/daviante-doh /usr/local/bin/daviante-doh
+COPY --from=ui-builder /ui/dist /etc/daviante-doh/ui
 
 # Set compatibility symlinks and GID 0 (g=u) permissions required by
 # Red Hat OpenShift restricted-v2 SCC arbitrary UIDs.
@@ -57,6 +70,8 @@ ENV DOH_LISTEN_ADDRESS="0.0.0.0:3000" \
     DOH_HEALTH_PATH="/healthz" \
     DOH_ENABLE_METRICS="false" \
     DOH_METRICS_PATH="/metrics" \
+    DOH_ENABLE_ADMIN_UI="false" \
+    DOH_ADMIN_UI_DIR="/etc/daviante-doh/ui" \
     DOH_MAX_CLIENTS="512" \
     DOH_MAX_CONCURRENT="16" \
     DOH_MAX_CONNS_PER_IP="0" \

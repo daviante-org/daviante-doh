@@ -278,4 +278,53 @@ impl DnsCache {
     pub fn insert(&self, key: CacheKey, raw_wire: Vec<u8>, ttl: u32) {
         self.insert_with_floor(key, raw_wire, ttl, ttl);
     }
+
+    /// Invalidates all cached DNS responses matching `domain_lower` (or any subdomain if `domain_lower` is a wildcard `*.zone` or suffix).
+    pub fn invalidate_domain(&self, domain_lower: &str) {
+        self.invalidate_domain_or_subtree(domain_lower);
+    }
+
+    /// Invalidates all cached DNS responses matching `domain_lower` or any subdomain beneath `domain_lower`.
+    pub fn invalidate_domain_or_subtree(&self, domain_lower: &str) {
+        if !self.is_enabled() {
+            return;
+        }
+        let clean = domain_lower
+            .trim()
+            .trim_end_matches('.')
+            .trim_start_matches("*.")
+            .to_ascii_lowercase();
+        if clean.is_empty() {
+            return;
+        }
+        let suffix = format!(".{clean}");
+        for shard in self.shards.iter() {
+            if let Ok(mut guard) = shard.write() {
+                guard.retain(|k, _| k.qname != clean && !k.qname.ends_with(&suffix));
+            }
+        }
+    }
+
+    /// Clears all cached DNS responses across all shards.
+    pub fn clear(&self) {
+        if !self.is_enabled() {
+            return;
+        }
+        for shard in self.shards.iter() {
+            if let Ok(mut guard) = shard.write() {
+                guard.clear();
+            }
+        }
+    }
+
+    /// Returns the current number of cached entries across all shards.
+    pub fn entry_count(&self) -> usize {
+        if !self.is_enabled() {
+            return 0;
+        }
+        self.shards
+            .iter()
+            .filter_map(|s| s.read().ok().map(|g| g.len()))
+            .sum()
+    }
 }

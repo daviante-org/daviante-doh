@@ -26,6 +26,16 @@ serviceAccount:
 config:
   listenAddress: "0.0.0.0:3000"
   adminListenAddress: ""
+  enableAdminUi: "false"
+  adminUiDir: "/etc/daviante-doh/ui"
+  dnsStoreFile: ""
+  adminUsername: ""
+  adminPasswordHashEnv: ""
+  oidcIssuerUrl: ""
+  oidcClientId: ""
+  oidcRedirectUri: ""
+  oidcAdminRole: "doh-admin"
+  oidcViewerRole: "doh-viewer"
   # Supports single upstream or comma-separated list for automatic failover (e.g. "9.9.9.9:53,1.1.1.1:53")
   serverAddress: "9.9.9.9:53"
   localBindAddress: ""

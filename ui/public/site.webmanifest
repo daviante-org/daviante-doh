@@ -1,0 +1,17 @@
+{
+  "name": "Daviante DoH Enterprise Control-Plane",
+  "short_name": "Daviante DoH",
+  "description": "Enterprise DNS-over-HTTPS (RFC 8484), Oblivious DoH (RFC 9230), Authoritative Local DNS Zones & Protective Policy Control-Plane by Daviante Organization.",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#0d1117",
+  "theme_color": "#0d1117",
+  "icons": [
+    {
+      "src": "/favicon.svg",
+      "sizes": "64x64 192x192 512x512",
+      "type": "image/svg+xml",
+      "purpose": "any"
+    }
+  ]
+}

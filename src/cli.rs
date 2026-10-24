@@ -413,6 +413,75 @@ pub fn build_cli() -> Command {
                 .help("Path to local split-horizon /etc/hosts override file for A, AAAA, and PTR records"),
         )
         .arg(
+            Arg::new("dns_store_file")
+                .long("dns-store-file")
+                .env("DOH_DNS_STORE_FILE")
+                .help("Path to persistent JSON store file for all-type Local DNS Records and Protective DNS Policy rules"),
+        )
+        .arg(bool_flag_arg(
+            "enable_admin_ui",
+            "enable-admin-ui",
+            None,
+            "DOH_ENABLE_ADMIN_UI",
+            "Enable the Admin Control-Plane REST API (/api/v1/*) and PatternFly 6 Management UI on --admin-listen-address (off by default)",
+        ))
+        .arg(
+            Arg::new("admin_ui_dir")
+                .long("admin-ui-dir")
+                .env("DOH_ADMIN_UI_DIR")
+                .help("Directory containing compiled PatternFly 6 Admin SPA assets (e.g. ./ui/dist)"),
+        )
+        .arg(
+            Arg::new("admin_username")
+                .long("admin-username")
+                .env("DOH_ADMIN_USERNAME")
+                .help("Local administrator username for Admin UI authentication"),
+        )
+        .arg(
+            Arg::new("admin_password_hash")
+                .long("admin-password-hash")
+                .env("DOH_ADMIN_PASSWORD_HASH")
+                .help("Argon2id v19 PHC password hash ($argon2id$v=19$...) for local administrator authentication"),
+        )
+        .arg(
+            Arg::new("oidc_issuer_url")
+                .long("oidc-issuer-url")
+                .env("DOH_OIDC_ISSUER_URL")
+                .help("Keycloak / OIDC issuer base URL (e.g. https://sso.example.com/realms/daviante)"),
+        )
+        .arg(
+            Arg::new("oidc_client_id")
+                .long("oidc-client-id")
+                .env("DOH_OIDC_CLIENT_ID")
+                .help("Keycloak / OIDC client ID for Admin UI PKCE authentication"),
+        )
+        .arg(
+            Arg::new("oidc_client_secret")
+                .long("oidc-client-secret")
+                .env("DOH_OIDC_CLIENT_SECRET")
+                .help("Optional Keycloak / OIDC confidential client secret"),
+        )
+        .arg(
+            Arg::new("oidc_redirect_uri")
+                .long("oidc-redirect-uri")
+                .env("DOH_OIDC_REDIRECT_URI")
+                .help("Keycloak / OIDC callback redirect URI (e.g. https://dns-admin.example.com/api/v1/auth/oidc/callback)"),
+        )
+        .arg(
+            Arg::new("oidc_admin_role")
+                .long("oidc-admin-role")
+                .env("DOH_OIDC_ADMIN_ROLE")
+                .default_value("doh-admin")
+                .help("Keycloak role granting full read/write Admin privileges (default: doh-admin)"),
+        )
+        .arg(
+            Arg::new("oidc_viewer_role")
+                .long("oidc-viewer-role")
+                .env("DOH_OIDC_VIEWER_ROLE")
+                .default_value("doh-viewer")
+                .help("Keycloak role granting read-only Viewer privileges (default: doh-viewer)"),
+        )
+        .arg(
             Arg::new("block_action")
                 .long("block-action")
                 .env("DOH_BLOCK_ACTION")
@@ -608,6 +677,61 @@ pub fn parse_from_matches(m: &ArgMatches) -> Result<ParsedCli, String> {
         .get_one::<String>("hosts_file")
         .filter(|s| !s.trim().is_empty())
         .map(PathBuf::from);
+    let dns_store_file = m
+        .get_one::<String>("dns_store_file")
+        .filter(|s| !s.trim().is_empty())
+        .map(PathBuf::from);
+    let enable_admin_ui = m
+        .get_one::<bool>("enable_admin_ui")
+        .copied()
+        .unwrap_or(false);
+    let admin_ui_dir = m
+        .get_one::<String>("admin_ui_dir")
+        .filter(|s| !s.trim().is_empty())
+        .map(PathBuf::from);
+    let admin_username = m
+        .get_one::<String>("admin_username")
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+    let admin_password_hash = m
+        .get_one::<String>("admin_password_hash")
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .or_else(|| {
+            let raw_pw = std::env::var("DOH_ADMIN_PASSWORD").ok()?;
+            let trimmed = raw_pw.trim();
+            if trimmed.is_empty() {
+                return None;
+            }
+            let mut salt = [0u8; 16];
+            crate::admin::crypto::fill_os_random(&mut salt).ok()?;
+            crate::admin::crypto::hash_password_argon2id(trimmed.as_bytes(), &salt, 19456, 2, 1)
+                .ok()
+        });
+    let oidc_issuer_url = m
+        .get_one::<String>("oidc_issuer_url")
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+    let oidc_client_id = m
+        .get_one::<String>("oidc_client_id")
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+    let oidc_client_secret = m
+        .get_one::<String>("oidc_client_secret")
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+    let oidc_redirect_uri = m
+        .get_one::<String>("oidc_redirect_uri")
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+    let oidc_admin_role = m
+        .get_one::<String>("oidc_admin_role")
+        .map(|s| s.trim().to_string())
+        .unwrap_or_else(|| "doh-admin".to_string());
+    let oidc_viewer_role = m
+        .get_one::<String>("oidc_viewer_role")
+        .map(|s| s.trim().to_string())
+        .unwrap_or_else(|| "doh-viewer".to_string());
     let block_action_str = m.get_one::<String>("block_action").unwrap();
     let block_action = BlockAction::from_str_name(block_action_str).map_err(|e| e.to_string())?;
 
@@ -695,6 +819,7 @@ pub fn parse_from_matches(m: &ArgMatches) -> Result<ParsedCli, String> {
         allowlist_file,
         blocklist_file,
         hosts_file,
+        dns_store_file,
         block_action,
         block_private_rebinding: m
             .get_one::<bool>("block_private_rebinding")
@@ -706,6 +831,16 @@ pub fn parse_from_matches(m: &ArgMatches) -> Result<ParsedCli, String> {
         cors_allow_origin: m.get_one::<String>("cors_allow_origin").unwrap().clone(),
         log_queries: m.get_one::<bool>("log_queries").copied().unwrap_or(false),
         log_client_ip,
+        enable_admin_ui,
+        admin_ui_dir,
+        admin_username,
+        admin_password_hash,
+        oidc_issuer_url,
+        oidc_client_id,
+        oidc_client_secret,
+        oidc_redirect_uri,
+        oidc_admin_role,
+        oidc_viewer_role,
         tls_cert_path,
         tls_cert_key_path,
         #[cfg(feature = "tls")]
@@ -846,6 +981,33 @@ pub fn format_config_summary(parsed: &ParsedCli) -> String {
     }
     if let Some(ref p) = c.hosts_file {
         flags.push(format!("--hosts-file {}", p.display()));
+    }
+    if let Some(ref p) = c.dns_store_file {
+        flags.push(format!("--dns-store-file {}", p.display()));
+    }
+    if c.enable_admin_ui {
+        flags.push("--enable-admin-ui".into());
+    }
+    if let Some(ref p) = c.admin_ui_dir {
+        flags.push(format!("--admin-ui-dir {}", p.display()));
+    }
+    if let Some(ref u) = c.admin_username {
+        flags.push(format!("--admin-username {u}"));
+    }
+    if c.admin_password_hash.is_some() {
+        flags.push("--admin-password-hash [REDACTED]".into());
+    }
+    if let Some(ref iss) = c.oidc_issuer_url {
+        flags.push(format!("--oidc-issuer-url {iss}"));
+    }
+    if let Some(ref cid) = c.oidc_client_id {
+        flags.push(format!("--oidc-client-id {cid}"));
+    }
+    if c.oidc_client_secret.is_some() {
+        flags.push("--oidc-client-secret [REDACTED]".into());
+    }
+    if let Some(ref ruri) = c.oidc_redirect_uri {
+        flags.push(format!("--oidc-redirect-uri {ruri}"));
     }
     if c.block_private_rebinding {
         flags.push("--block-private-rebinding".into());

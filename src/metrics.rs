@@ -1,16 +1,43 @@
 //! Lock-free atomic metrics, latency histograms, RCODE breakdowns, and Prometheus / OpenMetrics
 //! text exposition for `daviante-doh`.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 use std::fmt::Write as _;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+use serde::{Deserialize, Serialize};
 
 use crate::dns::wire::{
     RCODE_FORMERR, RCODE_NOERROR, RCODE_NOTIMP, RCODE_NXDOMAIN, RCODE_REFUSED, RCODE_SERVFAIL,
 };
+
+/// Maximum number of recent DNS policy/local activity events and admin audit entries retained in memory.
+pub const MAX_ACTIVITY_RING_SIZE: usize = 200;
+
+/// Zero-PII summary of a recent policy-blocked or local-store DNS query for the Admin Telemetry view.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RecentDnsActivityEntry {
+    pub timestamp_epoch: u64,
+    pub qname: String,
+    pub qtype: String,
+    pub rcode: String,
+    pub outcome: String,
+    pub latency_ms: f64,
+}
+
+/// Admin Control-Plane mutation audit entry retained in the bounded ring buffer.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AdminAuditEntry {
+    pub timestamp_epoch: u64,
+    pub username: String,
+    pub role: String,
+    pub action: String,
+    pub target: String,
+    pub detail: String,
+}
 
 /// Histogram bucket upper bounds in seconds (`le`).
 pub const HISTOGRAM_BUCKETS_SECS: [f64; 12] = [
@@ -104,6 +131,8 @@ pub struct DohMetricsInner {
     pub hist_json: LatencyHistogram,
     pub hist_odoh: LatencyHistogram,
     upstream_by_target: Mutex<BTreeMap<UpstreamMetricKey, u64>>,
+    recent_dns_activity: Mutex<VecDeque<RecentDnsActivityEntry>>,
+    recent_admin_audit: Mutex<VecDeque<AdminAuditEntry>>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -114,6 +143,11 @@ pub struct DohMetrics {
 impl DohMetrics {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    #[inline]
+    pub fn snapshot(&self) -> &DohMetricsInner {
+        &self.inner
     }
 
     #[inline]
@@ -329,6 +363,123 @@ impl DohMetrics {
         self.inner
             .connections_active
             .fetch_sub(1, Ordering::Relaxed);
+    }
+
+    /// Appends a zero-PII DNS policy/local resolution event to the bounded activity ring buffer.
+    pub fn record_dns_activity(
+        &self,
+        qname: &str,
+        qtype: u16,
+        rcode_val: u8,
+        outcome: &str,
+        latency_ms: f64,
+    ) {
+        let now_epoch = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let qtype_name = match qtype {
+            1 => "A".to_string(),
+            2 => "NS".to_string(),
+            5 => "CNAME".to_string(),
+            6 => "SOA".to_string(),
+            12 => "PTR".to_string(),
+            13 => "HINFO".to_string(),
+            15 => "MX".to_string(),
+            16 => "TXT".to_string(),
+            17 => "RP".to_string(),
+            28 => "AAAA".to_string(),
+            29 => "LOC".to_string(),
+            33 => "SRV".to_string(),
+            35 => "NAPTR".to_string(),
+            37 => "CERT".to_string(),
+            39 => "DNAME".to_string(),
+            43 => "DS".to_string(),
+            44 => "SSHFP".to_string(),
+            48 => "DNSKEY".to_string(),
+            52 => "TLSA".to_string(),
+            53 => "SMIMEA".to_string(),
+            59 => "CDS".to_string(),
+            60 => "CDNSKEY".to_string(),
+            61 => "OPENPGPKEY".to_string(),
+            64 => "SVCB".to_string(),
+            65 => "HTTPS".to_string(),
+            99 => "SPF".to_string(),
+            255 => "ANY".to_string(),
+            256 => "URI".to_string(),
+            257 => "CAA".to_string(),
+            other => format!("TYPE{other}"),
+        };
+        let rcode_str = match rcode_val {
+            RCODE_NOERROR => "NOERROR",
+            RCODE_FORMERR => "FORMERR",
+            RCODE_SERVFAIL => "SERVFAIL",
+            RCODE_NXDOMAIN => "NXDOMAIN",
+            RCODE_NOTIMP => "NOTIMP",
+            RCODE_REFUSED => "REFUSED",
+            _ => "OTHER",
+        }
+        .to_string();
+
+        if let Ok(mut guard) = self.inner.recent_dns_activity.lock() {
+            if guard.len() >= MAX_ACTIVITY_RING_SIZE {
+                guard.pop_back();
+            }
+            guard.push_front(RecentDnsActivityEntry {
+                timestamp_epoch: now_epoch,
+                qname: qname.to_string(),
+                qtype: qtype_name,
+                rcode: rcode_str,
+                outcome: outcome.to_string(),
+                latency_ms,
+            });
+        }
+    }
+
+    /// Appends an Admin Control-Plane mutation event to the bounded audit ring buffer.
+    pub fn record_admin_audit(
+        &self,
+        username: &str,
+        role: &str,
+        action: &str,
+        target: &str,
+        detail: &str,
+    ) {
+        let now_epoch = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        if let Ok(mut guard) = self.inner.recent_admin_audit.lock() {
+            if guard.len() >= MAX_ACTIVITY_RING_SIZE {
+                guard.pop_back();
+            }
+            guard.push_front(AdminAuditEntry {
+                timestamp_epoch: now_epoch,
+                username: username.to_string(),
+                role: role.to_string(),
+                action: action.to_string(),
+                target: target.to_string(),
+                detail: detail.to_string(),
+            });
+        }
+    }
+
+    /// Returns a snapshot of recent DNS policy/local activity events (newest first).
+    pub fn recent_dns_activity(&self) -> Vec<RecentDnsActivityEntry> {
+        self.inner
+            .recent_dns_activity
+            .lock()
+            .map(|g| g.iter().cloned().collect())
+            .unwrap_or_default()
+    }
+
+    /// Returns a snapshot of recent Admin Control-Plane audit events (newest first).
+    pub fn recent_admin_audit(&self) -> Vec<AdminAuditEntry> {
+        self.inner
+            .recent_admin_audit
+            .lock()
+            .map(|g| g.iter().cloned().collect())
+            .unwrap_or_default()
     }
 
     /// Formats all counters, gauges, and histograms in standard Prometheus / OpenMetrics (`text/plain; version=0.0.4`) format.
