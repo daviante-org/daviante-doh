@@ -2489,13 +2489,20 @@ pub mod admin_control_plane {
             let wire = daviante_doh::dns::wire::build_local_authoritative_response(
                 &q,
                 0,
-                &[(domain.clone(), compiled.rr_type, 300, compiled.rdata.clone())],
+                &[(
+                    domain.clone(),
+                    compiled.rr_type,
+                    300,
+                    compiled.rdata.clone(),
+                )],
                 &[],
                 &[],
             )
             .unwrap();
             let decoded_json = daviante_doh::dns::json::decode_wire_to_json(&wire).unwrap();
-            let ans = decoded_json.answer.expect("Answer section should be present");
+            let ans = decoded_json
+                .answer
+                .expect("Answer section should be present");
             assert_eq!(ans.len(), 1);
             assert!(!ans[0].data.is_empty());
         }
@@ -2516,7 +2523,8 @@ pub mod admin_control_plane {
         let _ = std::fs::remove_file(&store_path);
 
         let salt = b"0123456789abcdef";
-        let password_hash = hash_password_argon2id(b"S3cureAdminPass!2026", salt, 64, 2, 1).unwrap();
+        let password_hash =
+            hash_password_argon2id(b"S3cureAdminPass!2026", salt, 64, 2, 1).unwrap();
 
         let cfg = DohConfig {
             listen_address: pub_addr,
@@ -2747,12 +2755,19 @@ pub mod admin_control_plane {
         .await;
         assert!(mx_hdr.starts_with("HTTP/1.1 200 OK"));
         let mx_json: serde_json::Value = serde_json::from_slice(&mx_resp).unwrap();
-        assert_eq!(mx_json["dns_json"]["Answer"][0]["data"], "10 mail.corp.internal");
-        assert_eq!(mx_json["dns_json"]["Additional"][0]["name"], "mail.corp.internal");
+        assert_eq!(
+            mx_json["dns_json"]["Answer"][0]["data"],
+            "10 mail.corp.internal"
+        );
+        assert_eq!(
+            mx_json["dns_json"]["Additional"][0]["name"],
+            "mail.corp.internal"
+        );
         assert_eq!(mx_json["dns_json"]["Additional"][0]["data"], "10.50.0.25");
 
         // Query DNAME subtree (`mail.legacy.corp.internal` A) -> DNAME + synthesized CNAME + final A (10.50.0.25)
-        let dname_lk_body = br#"{"name":"mail.legacy.corp.internal","record_type":"A","do_bit":false}"#;
+        let dname_lk_body =
+            br#"{"name":"mail.legacy.corp.internal","record_type":"A","do_bit":false}"#;
         let (_, dname_resp) = raw_http_request(
             adm_addr,
             &format!(
@@ -2766,7 +2781,7 @@ pub mod admin_control_plane {
         let dname_answers = dname_json["dns_json"]["Answer"].as_array().unwrap();
         assert_eq!(dname_answers.len(), 3);
         assert_eq!(dname_answers[0]["type"], 39); // DNAME
-        assert_eq!(dname_answers[1]["type"], 5);  // Synthesized CNAME
+        assert_eq!(dname_answers[1]["type"], 5); // Synthesized CNAME
         assert_eq!(dname_answers[2]["data"], "10.50.0.25");
 
         // Query non-existent name in Authoritative zone (`missing.corp.internal`) -> local NXDOMAIN (3) + SOA in Authority
@@ -2818,4 +2833,3 @@ pub mod admin_control_plane {
         let _ = std::fs::remove_file(store_path);
     }
 }
-

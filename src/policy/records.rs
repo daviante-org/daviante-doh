@@ -10,8 +10,8 @@ use base64::Engine as _;
 use serde::{Deserialize, Serialize};
 
 use crate::dns::wire::{
-    RR_TYPE_A, RR_TYPE_AAAA, RR_TYPE_ANY, RR_TYPE_AXFR, RR_TYPE_CNAME, RR_TYPE_DNAME,
-    RR_TYPE_IXFR, RR_TYPE_OPT, RR_TYPE_PTR, RR_TYPE_SOA,
+    RR_TYPE_A, RR_TYPE_AAAA, RR_TYPE_ANY, RR_TYPE_AXFR, RR_TYPE_CNAME, RR_TYPE_DNAME, RR_TYPE_IXFR,
+    RR_TYPE_OPT, RR_TYPE_PTR, RR_TYPE_SOA,
 };
 use crate::policy::reverse_ptr_name;
 
@@ -385,9 +385,9 @@ impl LocalRecordData {
                 service,
                 regexp,
                 replacement,
-            } => format!(
-                "{order} {preference} \"{flags}\" \"{service}\" \"{regexp}\" {replacement}"
-            ),
+            } => {
+                format!("{order} {preference} \"{flags}\" \"{service}\" \"{regexp}\" {replacement}")
+            }
             Self::URI {
                 priority,
                 weight,
@@ -1165,7 +1165,8 @@ impl DnsZone {
             ));
         }
         let norm_domain = validate_general_domain_name(&self.domain, false)?;
-        let norm_mname = validate_target_hostname(&self.mname, "Zone SOA primary NS", false, false)?;
+        let norm_mname =
+            validate_target_hostname(&self.mname, "Zone SOA primary NS", false, false)?;
         let norm_rname =
             validate_target_hostname(&self.rname, "Zone SOA admin mailbox", false, true)?;
         if self.refresh == 0 || self.retry == 0 || self.expire == 0 || self.minimum == 0 {
@@ -1295,9 +1296,7 @@ impl LocalDnsRecord {
             }
             LocalRecordData::DNAME { target } => {
                 let norm_target = validate_target_hostname(target, "DNAME target", false, true)?;
-                if norm_target == norm_domain
-                    || norm_target.ends_with(&format!(".{norm_domain}"))
-                {
+                if norm_target == norm_domain || norm_target.ends_with(&format!(".{norm_domain}")) {
                     return Err(RecordValidationError::CnameLoop(
                         "DNAME record cannot redirect to itself or a subdomain of itself.".into(),
                     ));
@@ -1406,8 +1405,7 @@ impl LocalDnsRecord {
                 minimum,
             } => {
                 let norm_mname = validate_target_hostname(mname, "SOA primary NS", false, false)?;
-                let norm_rname =
-                    validate_target_hostname(rname, "SOA admin mailbox", false, true)?;
+                let norm_rname = validate_target_hostname(rname, "SOA admin mailbox", false, true)?;
                 encode_domain_wire(&norm_mname, &mut rdata)?;
                 encode_domain_wire(&norm_rname, &mut rdata)?;
                 rdata.extend_from_slice(&serial.to_be_bytes());
@@ -1442,12 +1440,10 @@ impl LocalDnsRecord {
                     0 => None,
                     1 => Some(32),
                     2 => Some(64),
-                    _ => {
-                        return Err(RecordValidationError::InvalidRecordData(
-                            "TLSA/SMIMEA matching_type must be 0 (Exact), 1 (SHA-256), or 2 (SHA-512)."
-                                .into(),
-                        ))
-                    }
+                    _ => return Err(RecordValidationError::InvalidRecordData(
+                        "TLSA/SMIMEA matching_type must be 0 (Exact), 1 (SHA-256), or 2 (SHA-512)."
+                            .into(),
+                    )),
                 };
                 let cert_bytes =
                     decode_hex_strict(cert_data, "Certificate association data", expected_len)?;
@@ -1498,17 +1494,16 @@ impl LocalDnsRecord {
                         "DS/CDS algorithm must be between 1 and 255.".into(),
                     ));
                 }
-                let expected_len = match *digest_type {
-                    1 => Some(20),
-                    2 => Some(32),
-                    4 => Some(48),
-                    _ => {
-                        return Err(RecordValidationError::InvalidRecordData(
+                let expected_len =
+                    match *digest_type {
+                        1 => Some(20),
+                        2 => Some(32),
+                        4 => Some(48),
+                        _ => return Err(RecordValidationError::InvalidRecordData(
                             "DS/CDS digest_type must be 1 (SHA-1), 2 (SHA-256), or 4 (SHA-384)."
                                 .into(),
-                        ))
-                    }
-                };
+                        )),
+                    };
                 let digest_bytes = decode_hex_strict(digest, "DS/CDS digest", expected_len)?;
                 rdata.extend_from_slice(&key_tag.to_be_bytes());
                 rdata.push(*algorithm);
@@ -1561,10 +1556,7 @@ impl LocalDnsRecord {
                 replacement,
             } => {
                 let clean_flags = flags.trim();
-                if !clean_flags
-                    .bytes()
-                    .all(|b| b.is_ascii_alphanumeric())
-                {
+                if !clean_flags.bytes().all(|b| b.is_ascii_alphanumeric()) {
                     return Err(RecordValidationError::InvalidRecordData(
                         "NAPTR flags must be alphanumeric (e.g. 'S', 'A', 'U', 'P', or empty)."
                             .into(),
@@ -1822,11 +1814,7 @@ pub fn parse_bind_zone_text(
 
     for (line_idx, raw_line) in text.lines().enumerate() {
         let line_no = line_idx + 1;
-        let line = raw_line
-            .split([';', '#'])
-            .next()
-            .unwrap_or("")
-            .trim();
+        let line = raw_line.split([';', '#']).next().unwrap_or("").trim();
         if line.is_empty() {
             continue;
         }
@@ -1926,7 +1914,9 @@ pub fn parse_bind_zone_text(
 
         let rtype = type_tok.to_ascii_uppercase();
         // Skip zone-apex SOA if pasting an exported zone file
-        if rtype == "SOA" && (raw_owner == "@" || origin.as_deref() == Some(raw_owner.trim_end_matches('.'))) {
+        if rtype == "SOA"
+            && (raw_owner == "@" || origin.as_deref() == Some(raw_owner.trim_end_matches('.')))
+        {
             continue;
         }
 

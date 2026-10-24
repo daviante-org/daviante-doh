@@ -155,10 +155,7 @@ fn build_json_response_raw(
 /// Applies strict security headers to all Admin Listener HTTP responses.
 pub fn apply_admin_security_headers(resp: &mut Response<HttpBody>, is_tls: bool) {
     let h = resp.headers_mut();
-    h.insert(
-        X_CONTENT_TYPE_OPTIONS,
-        HeaderValue::from_static("nosniff"),
-    );
+    h.insert(X_CONTENT_TYPE_OPTIONS, HeaderValue::from_static("nosniff"));
     h.insert(X_FRAME_OPTIONS, HeaderValue::from_static("DENY"));
     h.insert(
         CONTENT_SECURITY_POLICY,
@@ -710,7 +707,11 @@ async fn dispatch_api_v1(
                     None,
                 );
             }
-            if engine.admin_sessions().login_limiter.is_locked_out(client_ip) {
+            if engine
+                .admin_sessions()
+                .login_limiter
+                .is_locked_out(client_ip)
+            {
                 tracing::warn!(
                     event = "admin_login_rate_limited",
                     client_ip = ?client_ip,
@@ -975,7 +976,7 @@ async fn dispatch_api_v1(
 
 fn require_admin_role(
     session: &AdminSession,
-    client_ip: Option< std::net::IpAddr>,
+    client_ip: Option<std::net::IpAddr>,
     path: &str,
 ) -> Option<Response<HttpBody>> {
     if session.role.can_write() {
@@ -1079,7 +1080,11 @@ async fn handle_create_zone(
                 session.role.as_str(),
                 "zone.create",
                 &saved.domain,
-                &format!("Created {} zone (TTL {})", saved.mode.as_str(), saved.default_ttl),
+                &format!(
+                    "Created {} zone (TTL {})",
+                    saved.mode.as_str(),
+                    saved.default_ttl
+                ),
             );
             let view = DnsZoneView::from_zone(saved, 0);
             json_ok_response(StatusCode::CREATED, &view, None)
@@ -1140,7 +1145,9 @@ async fn handle_update_zone(
             if let Some(ref prev) = prev_domain {
                 engine.cache().invalidate_domain_or_subtree(prev);
             }
-            engine.cache().invalidate_domain_or_subtree(&old_zone.domain);
+            engine
+                .cache()
+                .invalidate_domain_or_subtree(&old_zone.domain);
             engine.cache().invalidate_domain_or_subtree(&saved.domain);
             let record_count = engine
                 .policy()
@@ -1162,7 +1169,11 @@ async fn handle_update_zone(
                 session.role.as_str(),
                 "zone.update",
                 &saved.domain,
-                &format!("Updated zone mode={} serial={}", saved.mode.as_str(), saved.serial),
+                &format!(
+                    "Updated zone mode={} serial={}",
+                    saved.mode.as_str(),
+                    saved.serial
+                ),
             );
             let view = DnsZoneView::from_zone(saved, record_count);
             json_ok_response(StatusCode::OK, &view, None)
@@ -1406,7 +1417,11 @@ async fn handle_create_record(
                 session.role.as_str(),
                 "record.create",
                 &saved.domain,
-                &format!("Created {} record (TTL {})", saved.data.type_name(), saved.ttl),
+                &format!(
+                    "Created {} record (TTL {})",
+                    saved.data.type_name(),
+                    saved.ttl
+                ),
             );
             let view = LocalDnsRecordView::from_record(saved);
             json_ok_response(StatusCode::CREATED, &view, None)
@@ -1480,7 +1495,11 @@ async fn handle_update_record(
                 session.role.as_str(),
                 "record.update",
                 &saved.domain,
-                &format!("Updated {} record (enabled={})", saved.data.type_name(), saved.enabled),
+                &format!(
+                    "Updated {} record (enabled={})",
+                    saved.data.type_name(),
+                    saved.enabled
+                ),
             );
             let view = LocalDnsRecordView::from_record(saved);
             json_ok_response(StatusCode::OK, &view, None)
@@ -1606,14 +1625,11 @@ async fn handle_import_records(
         None
     };
 
-    let mut candidates = match crate::policy::parse_bind_zone_text(
-        target_zone.as_ref(),
-        300,
-        &payload.content,
-    ) {
-        Ok(c) => c,
-        Err(e) => return validation_error_to_response(e),
-    };
+    let mut candidates =
+        match crate::policy::parse_bind_zone_text(target_zone.as_ref(), 300, &payload.content) {
+            Ok(c) => c,
+            Err(e) => return validation_error_to_response(e),
+        };
     for candidate in &mut candidates {
         let Ok(uid) = generate_uuid_v4() else {
             return problem_response(
@@ -2086,10 +2102,7 @@ async fn handle_dns_lookup(
     };
 
     let started = Instant::now();
-    let (resolved, source) = match engine
-        .resolve_for_admin_lookup(query_wire, client_ip)
-        .await
-    {
+    let (resolved, source) = match engine.resolve_for_admin_lookup(query_wire, client_ip).await {
         Ok(res) => res,
         Err(_) => {
             return problem_response(

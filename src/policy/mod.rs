@@ -732,7 +732,8 @@ impl DomainPolicy {
                     "The specified DNS zone does not exist.".to_string(),
                 ));
             };
-            record.domain = resolve_record_owner_in_zone(&record.domain, &zone.domain, &record.data)?;
+            record.domain =
+                resolve_record_owner_in_zone(&record.domain, &zone.domain, &record.data)?;
         }
 
         let compiled = validate_record_against_store(&record, &next.local_records)?;
@@ -743,8 +744,7 @@ impl DomainPolicy {
                 .zones
                 .iter()
                 .filter(|z| {
-                    record.domain == z.domain
-                        || record.domain.ends_with(&format!(".{}", z.domain))
+                    record.domain == z.domain || record.domain.ends_with(&format!(".{}", z.domain))
                 })
                 .max_by_key(|z| z.domain.len())
             {
@@ -864,8 +864,7 @@ impl DomainPolicy {
                     .zones
                     .iter()
                     .filter(|z| {
-                        rec.domain == z.domain
-                            || rec.domain.ends_with(&format!(".{}", z.domain))
+                        rec.domain == z.domain || rec.domain.ends_with(&format!(".{}", z.domain))
                     })
                     .max_by_key(|z| z.domain.len())
                 {
@@ -1150,20 +1149,21 @@ impl DomainPolicy {
 
         let clean = qname_lower.trim_matches('.');
         let enclosing_zone = guard.find_enclosing_zone(clean);
-        let zone_soa_authority = |cz: Option<&CompiledDnsZone>| -> Vec<(String, u16, u32, Vec<u8>)> {
-            match cz {
-                Some(z) => {
-                    let neg_ttl = z.zone.minimum.min(z.zone.default_ttl).max(1);
-                    vec![(
-                        z.zone.domain.clone(),
-                        RR_TYPE_SOA,
-                        neg_ttl,
-                        z.soa_rdata.clone(),
-                    )]
+        let zone_soa_authority =
+            |cz: Option<&CompiledDnsZone>| -> Vec<(String, u16, u32, Vec<u8>)> {
+                match cz {
+                    Some(z) => {
+                        let neg_ttl = z.zone.minimum.min(z.zone.default_ttl).max(1);
+                        vec![(
+                            z.zone.domain.clone(),
+                            RR_TYPE_SOA,
+                            neg_ttl,
+                            z.soa_rdata.clone(),
+                        )]
+                    }
+                    None => Vec::new(),
                 }
-                None => Vec::new(),
-            }
-        };
+            };
 
         // 0. Check RFC 6672 DNAME subtree redirection (`<prefix>.<dname_owner>` -> `<prefix>.<dname_target>`)
         if let Some((dname_owner, dname_rec, prefix)) = guard.find_ancestor_dname(clean) {
@@ -1241,9 +1241,8 @@ impl DomainPolicy {
                 let mut current_owner = clean.to_string();
                 let mut current_cname = first_cname;
                 for _ in 0..8 {
-                    min_ttl = Some(
-                        min_ttl.map_or(current_cname.ttl, |cur| cur.min(current_cname.ttl)),
-                    );
+                    min_ttl =
+                        Some(min_ttl.map_or(current_cname.ttl, |cur| cur.min(current_cname.ttl)));
                     answer_rrs.push((
                         current_owner.clone(),
                         RR_TYPE_CNAME,
@@ -1378,13 +1377,8 @@ impl DomainPolicy {
                         .unwrap_or(default_ttl)
                 });
             let authority_rrs = zone_soa_authority(enclosing_zone);
-            let wire = build_local_authoritative_response(
-                query,
-                RCODE_NOERROR,
-                &[],
-                &authority_rrs,
-                &[],
-            )?;
+            let wire =
+                build_local_authoritative_response(query, RCODE_NOERROR, &[], &authority_rrs, &[])?;
             return Ok(Some((wire, nodata_ttl)));
         }
 
@@ -1439,12 +1433,8 @@ impl DomainPolicy {
         // 2. Check synthesized `auto_ptr` reverse records for `PTR` queries
         if qtype == RR_TYPE_PTR {
             if let Some((ptr_ttl, ptr_rdata)) = guard.auto_ptr_by_reverse.get(clean) {
-                let answer_rrs = vec![(
-                    clean.to_string(),
-                    RR_TYPE_PTR,
-                    *ptr_ttl,
-                    ptr_rdata.clone(),
-                )];
+                let answer_rrs =
+                    vec![(clean.to_string(), RR_TYPE_PTR, *ptr_ttl, ptr_rdata.clone())];
                 let wire = build_local_records_response(query, &answer_rrs)?;
                 return Ok(Some((wire, *ptr_ttl)));
             }

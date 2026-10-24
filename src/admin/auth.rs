@@ -326,7 +326,10 @@ pub fn format_session_clear_cookie(is_tls: bool) -> String {
 /// 1. Validates `Sec-Fetch-Site` (must be `same-origin` or `none` if present).
 /// 2. Validates `Origin` host matches `Host` header if `Origin` is present.
 /// 3. Validates `X-CSRF-Token` header matches `session.csrf_token` in constant time.
-pub fn verify_csrf_request(headers: &HeaderMap, session: &AdminSession) -> Result<(), &'static str> {
+pub fn verify_csrf_request(
+    headers: &HeaderMap,
+    session: &AdminSession,
+) -> Result<(), &'static str> {
     if let Some(sec_fetch) = headers.get("sec-fetch-site").and_then(|v| v.to_str().ok()) {
         if !matches!(sec_fetch, "same-origin" | "none") {
             return Err("Cross-site request blocked by Sec-Fetch-Site policy.");
@@ -563,7 +566,9 @@ pub fn verify_oidc_id_token(
     } else if !viewer_role.is_empty() && roles.contains(&viewer_role) {
         AdminRole::Viewer
     } else {
-        return Err("User does not possess required OIDC role (doh-admin or doh-viewer).".to_string());
+        return Err(
+            "User does not possess required OIDC role (doh-admin or doh-viewer).".to_string(),
+        );
     };
 
     let username = claims

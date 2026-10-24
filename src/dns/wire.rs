@@ -888,34 +888,33 @@ pub fn build_local_authoritative_response(
 ) -> Result<Vec<u8>, DohError> {
     let (parsed, mut resp) = init_synthetic_response(query, 0x84, response_rcode)?;
 
-    let append_rr_slice = |resp: &mut Vec<u8>,
-                           rrs: &[(String, u16, u32, Vec<u8>)]|
-     -> Result<u16, DohError> {
-        let mut count = 0u16;
-        if parsed.qclass == DNS_CLASS_IN {
-            for (owner, rr_type, ttl, rdata) in rrs {
-                if rdata.len() > u16::MAX as usize {
-                    return Err(DohError::PayloadTooLarge);
-                }
-                if owner.eq_ignore_ascii_case(&parsed.qname) {
-                    append_compressed_answer_rr(resp, *rr_type, *ttl, rdata);
-                } else {
-                    let owner_wire = encode_domain_wire_labels(owner)?;
-                    resp.extend_from_slice(&owner_wire);
-                    resp.extend_from_slice(&rr_type.to_be_bytes());
-                    resp.extend_from_slice(&DNS_CLASS_IN.to_be_bytes());
-                    resp.extend_from_slice(&ttl.to_be_bytes());
-                    resp.extend_from_slice(&(rdata.len() as u16).to_be_bytes());
-                    resp.extend_from_slice(rdata);
-                }
-                count = count.saturating_add(1);
-                if resp.len() > MAX_DNS_MESSAGE_LEN {
-                    return Err(DohError::PayloadTooLarge);
+    let append_rr_slice =
+        |resp: &mut Vec<u8>, rrs: &[(String, u16, u32, Vec<u8>)]| -> Result<u16, DohError> {
+            let mut count = 0u16;
+            if parsed.qclass == DNS_CLASS_IN {
+                for (owner, rr_type, ttl, rdata) in rrs {
+                    if rdata.len() > u16::MAX as usize {
+                        return Err(DohError::PayloadTooLarge);
+                    }
+                    if owner.eq_ignore_ascii_case(&parsed.qname) {
+                        append_compressed_answer_rr(resp, *rr_type, *ttl, rdata);
+                    } else {
+                        let owner_wire = encode_domain_wire_labels(owner)?;
+                        resp.extend_from_slice(&owner_wire);
+                        resp.extend_from_slice(&rr_type.to_be_bytes());
+                        resp.extend_from_slice(&DNS_CLASS_IN.to_be_bytes());
+                        resp.extend_from_slice(&ttl.to_be_bytes());
+                        resp.extend_from_slice(&(rdata.len() as u16).to_be_bytes());
+                        resp.extend_from_slice(rdata);
+                    }
+                    count = count.saturating_add(1);
+                    if resp.len() > MAX_DNS_MESSAGE_LEN {
+                        return Err(DohError::PayloadTooLarge);
+                    }
                 }
             }
-        }
-        Ok(count)
-    };
+            Ok(count)
+        };
 
     let an_count = append_rr_slice(&mut resp, answer_rrs)?;
     let ns_count = append_rr_slice(&mut resp, authority_rrs)?;
