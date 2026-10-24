@@ -2,51 +2,69 @@ import React from 'react';
 import {
   Alert,
   Content,
-  ContentVariants,
+  Grid,
+  GridItem,
   PageSection,
   Stack,
-  StackItem
+  StackItem,
+  Title
 } from '@patternfly/react-core';
 import { useDnsLookup } from '../hooks/useDnsLookup';
-import { LookupJsonPayloadCard } from './LookupJsonPayloadCard';
-import { LookupQueryFormCard } from './LookupQueryFormCard';
-import { LookupResultSummaryCard } from './LookupResultSummaryCard';
+import { LookupQueryDirectoryCard } from './LookupQueryDirectoryCard';
+import { LookupResultDetailCard } from './LookupResultDetailCard';
 
 export function DnsLookupTesterFeature(): React.JSX.Element {
-  const { form, result, lookupError, isRunning, onSubmit } = useDnsLookup();
+  const {
+    form,
+    result,
+    selectedEntry,
+    history,
+    setSelectedHistoryId,
+    lookupError,
+    isRunning,
+    onSubmit
+  } = useDnsLookup();
 
   return (
-    <PageSection isFilled>
-      <Stack hasGutter>
-        <StackItem>
-          <Content component={ContentVariants.h1}>Live DNS Lookup &amp; Policy Tester</Content>
-          <Content component={ContentVariants.p}>
-            Test domain resolution directly against the DoH server pipeline (Protective DNS Policy
-            → Local Overrides / CNAME Chain → Upstream Pool + DNS Rebinding Guard).
-          </Content>
-        </StackItem>
-
-        {lookupError !== null && (
+    <>
+      <PageSection>
+        <Stack hasGutter>
           <StackItem>
-            <Alert variant="danger" isInline title={lookupError} />
+            <Title headingLevel="h1" size="2xl">
+              Live DNS Lookup &amp; Policy Tester
+            </Title>
+            <Content component="p">
+              Test domain resolution directly against the DoH server pipeline (Protective DNS
+              Policy → Local Overrides / CNAME Chain → Upstream Pool + DNS Rebinding Guard).
+            </Content>
           </StackItem>
-        )}
 
-        <StackItem>
-          <LookupQueryFormCard form={form} isRunning={isRunning} onSubmit={onSubmit} />
-        </StackItem>
+          {lookupError !== null && (
+            <StackItem>
+              <Alert variant="danger" isInline title={lookupError} />
+            </StackItem>
+          )}
+        </Stack>
+      </PageSection>
 
-        {result !== null && (
-          <>
-            <StackItem>
-              <LookupResultSummaryCard result={result} />
-            </StackItem>
-            <StackItem>
-              <LookupJsonPayloadCard result={result} />
-            </StackItem>
-          </>
-        )}
-      </Stack>
-    </PageSection>
+      <PageSection isFilled>
+        <Grid hasGutter>
+          <GridItem span={12} lg={4}>
+            <LookupQueryDirectoryCard
+              form={form}
+              isRunning={isRunning}
+              history={history}
+              selectedEntry={selectedEntry}
+              onSelectHistoryId={setSelectedHistoryId}
+              onSubmit={onSubmit}
+            />
+          </GridItem>
+
+          <GridItem span={12} lg={8}>
+            <LookupResultDetailCard result={result} selectedEntry={selectedEntry} />
+          </GridItem>
+        </Grid>
+      </PageSection>
+    </>
   );
 }

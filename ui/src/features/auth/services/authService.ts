@@ -26,7 +26,10 @@ export const authService = {
     await httpClient.request(
       '/api/v1/auth/logout',
       { method: 'POST', body: JSON.stringify({}) },
-      z.object({ ok: z.boolean() })
+      z.object({
+        ok: z.boolean().optional(),
+        status: z.string().optional()
+      })
     );
     httpClient.setCsrfToken(null);
   }

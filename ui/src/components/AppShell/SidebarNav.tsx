@@ -1,20 +1,20 @@
 import React, { useContext } from 'react';
 import {
-  Divider,
   Nav,
   NavExpandable,
+  NavGroup,
   NavItem,
-  NavList,
   PageContext
 } from '@patternfly/react-core';
 import { DAVIANTE_ORG_URL } from '../../constants';
 import type { NavigationTab } from '../../types';
 import { isSafeHrefUrl } from '../../utils';
 import type { SidebarNavProps } from './AppShell.types';
+import { NavIcon } from './NavIcon';
 
 /**
- * Inner navigation component consuming PageContext so mobile drawer auto-closes on navigation
- * (AGENTS.md Rule 4.2).
+ * Categorized sidebar navigation consuming PageContext so mobile drawer auto-closes on navigation
+ * (AGENTS.md Rule 4.2 & Go_Modern/console AppSidebar pattern).
  */
 export function SidebarNav({
   activeTab,
@@ -39,21 +39,41 @@ export function SidebarNav({
 
   return (
     <Nav onSelect={handleSelect} aria-label="Daviante DoH Admin Primary Navigation">
-      <NavList>
-        <NavItem itemId="records" isActive={activeTab === 'records'}>
+      <NavGroup title="DNS Authority & Resolution">
+        <NavItem
+          itemId="records"
+          isActive={activeTab === 'records'}
+          icon={<NavIcon name="Database" />}
+        >
           Local DNS Records
         </NavItem>
-        <NavItem itemId="policy" isActive={activeTab === 'policy'}>
-          Protective DNS Policy
-        </NavItem>
-        <NavItem itemId="lookup" isActive={activeTab === 'lookup'}>
+        <NavItem
+          itemId="lookup"
+          isActive={activeTab === 'lookup'}
+          icon={<NavIcon name="Search" />}
+        >
           Live DNS Lookup Tester
         </NavItem>
-        <NavItem itemId="telemetry" isActive={activeTab === 'telemetry'}>
+      </NavGroup>
+
+      <NavGroup title="Security & Threat Defense">
+        <NavItem
+          itemId="policy"
+          isActive={activeTab === 'policy'}
+          icon={<NavIcon name="Shield" />}
+        >
+          Protective DNS Policy
+        </NavItem>
+      </NavGroup>
+
+      <NavGroup title="Observability & Governance">
+        <NavItem
+          itemId="telemetry"
+          isActive={activeTab === 'telemetry'}
+          icon={<NavIcon name="Tachometer" />}
+        >
           Telemetry &amp; Audit Log
         </NavItem>
-
-        <Divider component="li" />
 
         <NavExpandable
           title="Governance & Compliance"
@@ -116,7 +136,7 @@ export function SidebarNav({
             </NavItem>
           )}
         </NavExpandable>
-      </NavList>
+      </NavGroup>
     </Nav>
   );
 }

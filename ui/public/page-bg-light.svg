@@ -1,0 +1,276 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="900" viewBox="0 0 1600 900" fill="none">
+  <defs>
+    <!-- Globe Sphere Gradient (Light Mode) -->
+    <radialGradient id="globeSphereLight" cx="1440" cy="740" r="310" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#E0F2FE" />
+      <stop offset="55%" stop-color="#CDE2FD" />
+      <stop offset="100%" stop-color="#BFDBFE" />
+    </radialGradient>
+
+    <!-- Shield Surface Gradient (Light Mode) -->
+    <linearGradient id="shieldFaceLight" x1="1260" y1="716" x2="1364" y2="868" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#FFFFFF" />
+      <stop offset="100%" stop-color="#F0F7FF" />
+    </linearGradient>
+
+    <!-- Shield Drop Shadow -->
+    <filter id="shieldShadowLight" x="1240" y="700" width="148" height="192" filterUnits="userSpaceOnUse" color-interpolation-filters="sRGB">
+      <feDropShadow dx="0" dy="6" stdDeviation="8" flood-color="#0284C7" flood-opacity="0.14" />
+    </filter>
+
+    <!-- Clip Path for Wireframe Globe Interior -->
+    <clipPath id="globeClipLight">
+      <circle cx="1518" cy="830" r="230" />
+    </clipPath>
+  </defs>
+
+  <!-- ===================================================================== -->
+  <!-- 1. TOP-RIGHT CIRCUIT & ROUTING TRACES (x = 1290..1600, y = 0..96)     -->
+  <!-- ===================================================================== -->
+  <g id="top-right-circuit-traces">
+    <!-- Trace 1: Upper-right dashed sky-blue line -->
+    <path
+      d="M1458 0L1476 18H1600"
+      stroke="#93C5FD"
+      stroke-opacity="0.65"
+      stroke-width="2"
+      stroke-dasharray="5 5"
+      stroke-linecap="round"
+      stroke-linejoin="round"
+    />
+
+    <!-- Trace 2: Middle cyan-blue routing line with solid node at (1515, 30) -->
+    <path
+      d="M1368 0L1398 30H1515L1557 72H1600"
+      stroke="#7DD3FC"
+      stroke-opacity="0.55"
+      stroke-width="2"
+      stroke-linecap="round"
+      stroke-linejoin="round"
+    />
+    <circle cx="1515" cy="30" r="4.5" fill="#0284C7" fill-opacity="0.75" />
+
+    <!-- Trace 3: Lower slate-cyan routing line with solid slate node & hollow cyan ring -->
+    <path
+      d="M1290 0L1338 48H1482L1530 96H1600"
+      stroke="#CBD5E1"
+      stroke-opacity="0.65"
+      stroke-width="2"
+      stroke-linecap="round"
+      stroke-linejoin="round"
+    />
+    <circle cx="1340" cy="48" r="5" fill="#CBD5E1" />
+    <circle cx="1482" cy="48" r="5.5" fill="#FFFFFF" stroke="#06B6D4" stroke-opacity="0.75" stroke-width="2.2" />
+  </g>
+
+  <!-- ===================================================================== -->
+  <!-- 2. BOTTOM-RIGHT CONCENTRIC AURA HALOS (cx = 1518, cy = 830)           -->
+  <!-- ===================================================================== -->
+  <g id="concentric-doh-halos">
+    <!-- Outer Cool-Slate Halo (r = 428, top at y = 402, left at x = 1090) -->
+    <circle cx="1518" cy="830" r="428" fill="#F1F5F9" fill-opacity="0.88" />
+    <!-- Middle Soft Aqua/Cyan Halo (r = 356, top at y = 474, left at x = 1162) -->
+    <circle cx="1518" cy="830" r="356" fill="#ECFEFF" fill-opacity="0.92" />
+    <!-- Inner Soft Sky-Blue Halo (r = 290, top at y = 540, left at x = 1228) -->
+    <circle cx="1518" cy="830" r="290" fill="#E0F2FE" fill-opacity="0.95" />
+  </g>
+
+  <!-- ===================================================================== -->
+  <!-- 3. WIREFRAME DNS GLOBE & ANYCAST NODES (cx = 1518, cy = 830, r = 230) -->
+  <!-- ===================================================================== -->
+  <g id="dns-anycast-globe">
+    <!-- Globe Base Sphere -->
+    <circle cx="1518" cy="830" r="230" fill="url(#globeSphereLight)" />
+
+    <!-- Clipped Globe Interior: Continent Patches & Latitude/Longitude Grid -->
+    <g clip-path="url(#globeClipLight)">
+      <!-- Soft Continent / Cloud Silhouettes -->
+      <ellipse cx="1528" cy="734" rx="64" ry="52" fill="#B4D5FD" fill-opacity="0.75" />
+      <ellipse cx="1414" cy="788" rx="48" ry="42" fill="#B4D5FD" fill-opacity="0.68" />
+      <ellipse cx="1548" cy="884" rx="74" ry="46" fill="#B4D5FD" fill-opacity="0.72" />
+      <ellipse cx="1615" cy="790" rx="46" ry="58" fill="#B4D5FD" fill-opacity="0.6" />
+
+      <!-- Longitude Meridians -->
+      <line x1="1518" y1="600" x2="1518" y2="1060" stroke="#60A5FA" stroke-opacity="0.55" stroke-width="1.6" />
+      <ellipse cx="1518" cy="830" rx="72" ry="230" stroke="#60A5FA" stroke-opacity="0.55" stroke-width="1.6" />
+      <ellipse cx="1518" cy="830" rx="148" ry="230" stroke="#60A5FA" stroke-opacity="0.55" stroke-width="1.6" />
+      <ellipse cx="1518" cy="830" rx="205" ry="230" stroke="#60A5FA" stroke-opacity="0.45" stroke-width="1.5" />
+
+      <!-- Latitude Parallels (Curved Geodesics) -->
+      <path d="M1288 680 Q1518 710 1748 680" stroke="#60A5FA" stroke-opacity="0.55" stroke-width="1.6" />
+      <path d="M1288 766 Q1518 784 1748 766" stroke="#60A5FA" stroke-opacity="0.58" stroke-width="1.6" />
+      <path d="M1288 852 Q1518 856 1748 852" stroke="#60A5FA" stroke-opacity="0.58" stroke-width="1.6" />
+      <path d="M1288 936 Q1518 920 1748 936" stroke="#60A5FA" stroke-opacity="0.5" stroke-width="1.6" />
+    </g>
+
+    <!-- Globe Outer Perimeter Ring -->
+    <circle cx="1518" cy="830" r="230" stroke="#60A5FA" stroke-opacity="0.85" stroke-width="2.2" />
+
+    <!-- Global Anycast Routing Arcs & Nodes on the Globe -->
+    <!-- Arc 1: Upper-left node (1395, 714) to upper-mid node (1468, 696) -->
+    <path
+      d="M1395 714 Q1428 682 1468 696"
+      stroke="#38BDF8"
+      stroke-opacity="0.85"
+      stroke-width="2"
+      stroke-dasharray="4 4"
+      stroke-linecap="round"
+    />
+    <!-- Arc 2: Validated DoH egress from Shield (1362, 780) to primary globe node (1452, 774) -->
+    <path
+      d="M1362 775 L1452 769"
+      stroke="#38BDF8"
+      stroke-opacity="0.75"
+      stroke-width="2"
+      stroke-dasharray="4 4"
+      stroke-linecap="round"
+    />
+    <path
+      d="M1362 782 L1452 776"
+      stroke="#0284C7"
+      stroke-opacity="0.9"
+      stroke-width="3"
+      stroke-linecap="round"
+    />
+    <!-- Arc 3: Primary globe node (1452, 774) to lower-left cyan node (1377, 831) -->
+    <path
+      d="M1452 774 Q1404 792 1377 831"
+      stroke="#06B6D4"
+      stroke-opacity="0.85"
+      stroke-width="2.2"
+      stroke-linecap="round"
+    />
+
+    <!-- Node A: Upper-Left Hollow Node (1395, 714) -->
+    <circle cx="1395" cy="714" r="6.5" fill="#E0F2FE" stroke="#0284C7" stroke-width="2.4" />
+    <circle cx="1395" cy="714" r="2.2" fill="#0284C7" />
+
+    <!-- Node B: Upper-Mid Hollow Blue Node (1468, 696) -->
+    <circle cx="1468" cy="696" r="5.5" fill="#EFF6FF" stroke="#2563EB" stroke-width="2.4" />
+
+    <!-- Node C: Primary Target Anycast Node (1452, 774) -->
+    <circle cx="1452" cy="774" r="7.5" fill="#0284C7" />
+    <circle cx="1452" cy="774" r="3" fill="#E0F2FE" />
+
+    <!-- Node D: Lower-Left Cyan Node (1377, 831) -->
+    <circle cx="1377" cy="831" r="5.5" fill="#ECFEFF" stroke="#06B6D4" stroke-width="2.4" />
+  </g>
+
+  <!-- ===================================================================== -->
+  <!-- 4. FLOATING PROTOCOL / INFO BADGE (cx = 1316, cy = 597)               -->
+  <!-- ===================================================================== -->
+  <g id="protocol-info-badge">
+    <circle
+      cx="1316"
+      cy="597"
+      r="15"
+      stroke="#38BDF8"
+      stroke-opacity="0.65"
+      stroke-width="2"
+      stroke-dasharray="5 3"
+    />
+    <circle cx="1316" cy="597" r="10.5" fill="#FFFFFF" stroke="#38BDF8" stroke-opacity="0.85" stroke-width="1.8" />
+    <circle cx="1316" cy="592.5" r="1.5" fill="#0284C7" />
+    <line x1="1316" y1="596" x2="1316" y2="602.5" stroke="#0284C7" stroke-width="2.2" stroke-linecap="round" />
+  </g>
+
+  <!-- ===================================================================== -->
+  <!-- 5. INCOMING NETWORK & DoH QUERY STREAMS (x = 848..1260, y = 744..900) -->
+  <!-- ===================================================================== -->
+  <g id="incoming-doh-streams">
+    <!-- Subtle Secondary Diagonal Dashed Trace (x = 1158..1232, y = 900..840) -->
+    <path
+      d="M1158 900 L1232 840"
+      stroke="#BAE6FD"
+      stroke-opacity="0.85"
+      stroke-width="2"
+      stroke-dasharray="4 5"
+      stroke-linecap="round"
+    />
+
+    <!-- Stream 1: Curved Cyan Fiber / TLS Stream (from x=1016, y=900 to x=1198, y=756) -->
+    <path
+      d="M1016 900 C1048 820 1114 756 1198 756"
+      stroke="#A5F3FC"
+      stroke-opacity="0.85"
+      stroke-width="8"
+      stroke-linecap="round"
+    />
+    <path
+      d="M1016 900 C1048 820 1114 756 1198 756"
+      stroke="#06B6D4"
+      stroke-opacity="0.85"
+      stroke-width="2.4"
+      stroke-dasharray="5 6"
+      stroke-linecap="round"
+    />
+    <!-- Stream 1 Capsule Connector Head (x = 1196..1242, y = 744..768) -->
+    <line x1="1240" y1="756" x2="1260" y2="756" stroke="#38BDF8" stroke-width="3" />
+    <rect x="1196" y="744" width="44" height="24" rx="12" fill="#0E7490" />
+    <rect x="1202" y="748" width="22" height="16" rx="8" fill="#155E75" />
+    <circle cx="1232" cy="756" r="4.5" fill="#67E8F9" />
+
+    <!-- Stream 2: Orthogonal Blue Ethernet / DNS Packet Stream (from x=848, y=900 to x=1212, y=828) -->
+    <path
+      d="M848 900 V856 Q848 828 876 828 H1212"
+      stroke="#C9E2FE"
+      stroke-opacity="0.95"
+      stroke-width="9"
+      stroke-linecap="round"
+      stroke-linejoin="round"
+    />
+    <path
+      d="M848 900 V856 Q848 828 876 828 H1212"
+      stroke="#60A5FA"
+      stroke-opacity="0.85"
+      stroke-width="2.5"
+      stroke-dasharray="6 8"
+      stroke-linecap="round"
+      stroke-linejoin="round"
+    />
+    <!-- Stream 2 Royal-Blue RJ45 / Network Plug Connector (x = 1210..1260, y = 813..843) -->
+    <rect x="1250" y="821" width="10" height="14" rx="2" fill="#7DD3FC" />
+    <rect x="1210" y="819" width="14" height="18" rx="3" fill="#2563EB" />
+    <rect x="1220" y="813" width="32" height="30" rx="5" fill="#1D4ED8" />
+    <!-- Cyan-Green Status LED inside Plug -->
+    <circle cx="1231" cy="828" r="3.5" fill="#2DD4BF" />
+  </g>
+
+  <!-- ===================================================================== -->
+  <!-- 6. PROTECTIVE DoH SECURITY SHIELD & PADLOCK (x = 1260..1364)          -->
+  <!-- ===================================================================== -->
+  <g id="protective-doh-shield" filter="url(#shieldShadowLight)">
+    <!-- Outer Shield Crest -->
+    <path
+      d="M1312 716 L1364 734 V786 C1364 824 1340 850 1312 868 C1284 850 1260 824 1260 786 V734 L1312 716 Z"
+      fill="url(#shieldFaceLight)"
+      stroke="#38BDF8"
+      stroke-width="2.8"
+      stroke-linejoin="round"
+    />
+    <!-- Inner Shield Bevel Surface -->
+    <path
+      d="M1312 726 L1354 741 V785 C1354 817 1334 839 1312 855 C1290 839 1270 817 1270 785 V741 L1312 726 Z"
+      fill="#EFF6FF"
+    />
+
+    <!-- Padlock Icon Inside Shield -->
+    <!-- Lock Shackle -->
+    <path
+      d="M1302 780 V770 C1302 764.5 1306.5 760 1312 760 C1317.5 760 1322 764.5 1322 770 V780"
+      stroke="#0284C7"
+      stroke-width="4.2"
+      stroke-linecap="round"
+    />
+    <!-- Lock Body -->
+    <rect x="1296" y="778" width="32" height="26" rx="5" fill="#0284C7" />
+    <!-- Lock Keyhole -->
+    <circle cx="1312" cy="788.5" r="3" fill="#FFFFFF" />
+    <path d="M1312 790.5 V797.5" stroke="#FFFFFF" stroke-width="2.6" stroke-linecap="round" />
+
+    <!-- 3-Segment DoH Verification Status Bar Below Padlock -->
+    <rect x="1296" y="816" width="9.5" height="4" rx="2" fill="#10B981" />
+    <rect x="1307.25" y="816" width="9.5" height="4" rx="2" fill="#06B6D4" />
+    <rect x="1318.5" y="816" width="9.5" height="4" rx="2" fill="#3B82F6" />
+  </g>
+</svg>

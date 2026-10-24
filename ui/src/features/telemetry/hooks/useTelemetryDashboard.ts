@@ -8,9 +8,14 @@ import type {
   TelemetrySummaryResponse
 } from '../types/telemetry.types';
 
+export type TelemetryStreamMode = 'activity' | 'audit';
+
 export function useTelemetryDashboard() {
+  const [streamMode, setStreamMode] = useState<TelemetryStreamMode>('activity');
   const [summary, setSummary] = useState<TelemetrySummaryResponse | null>(null);
+
   const [activity, setActivity] = useState<DnsActivityEntry[]>([]);
+  const [selectedActivityIdx, setSelectedActivityIdx] = useState<number>(0);
   const [activityTotal, setActivityTotal] = useState(0);
   const [activityPage, setActivityPage] = useState(1);
   const [activityPerPage, setActivityPerPage] = useState(20);
@@ -18,13 +23,29 @@ export function useTelemetryDashboard() {
   const debouncedActivitySearch = useDebounce(activitySearch, 250);
 
   const [auditEvents, setAuditEvents] = useState<AuditEventEntry[]>([]);
+  const [selectedAuditIdx, setSelectedAuditIdx] = useState<number>(0);
   const [auditTotal, setAuditTotal] = useState(0);
   const [auditPage, setAuditPage] = useState(1);
   const [auditPerPage, setAuditPerPage] = useState(20);
+  const [auditSearch, setAuditSearch] = useState('');
 
   const [isLoading, setIsLoading] = useState(true);
   const [pageError, setPageError] = useState<string | null>(null);
   const [autoRefresh, setAutoRefresh] = useState(false);
+
+  const filteredAuditEvents = auditEvents.filter((evt) => {
+    const q = auditSearch.trim().toLowerCase();
+    if (!q) return true;
+    return (
+      evt.actor.toLowerCase().includes(q) ||
+      evt.action.toLowerCase().includes(q) ||
+      evt.target.toLowerCase().includes(q)
+    );
+  });
+
+  const selectedActivity = activity[selectedActivityIdx] ?? activity[0] ?? null;
+  const selectedAuditEvent =
+    filteredAuditEvents[selectedAuditIdx] ?? filteredAuditEvents[0] ?? null;
 
   const loadTelemetry = async (): Promise<void> => {
     setPageError(null);
@@ -67,24 +88,35 @@ export function useTelemetryDashboard() {
   }, [autoRefresh, activityPage, activityPerPage, debouncedActivitySearch, auditPage, auditPerPage]);
 
   return {
+    streamMode,
     summary,
     activity,
+    selectedActivity,
+    selectedActivityIdx,
     activityTotal,
     activityPage,
     activityPerPage,
     activitySearch,
     auditEvents,
+    filteredAuditEvents,
+    selectedAuditEvent,
+    selectedAuditIdx,
     auditTotal,
     auditPage,
     auditPerPage,
+    auditSearch,
     isLoading,
     pageError,
     autoRefresh,
+    setStreamMode,
+    setSelectedActivityIdx,
+    setSelectedAuditIdx,
     setActivityPage,
     setActivityPerPage,
     setActivitySearch,
     setAuditPage,
     setAuditPerPage,
+    setAuditSearch,
     setAutoRefresh,
     loadTelemetry
   };

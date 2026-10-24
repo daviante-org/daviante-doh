@@ -8,25 +8,65 @@ export type PolicyMatchMode = z.infer<typeof PolicyMatchModeSchema>;
 export const PolicyActionSchema = z.enum(['Allow', 'BlockNxDomain', 'Sinkhole']);
 export type PolicyAction = z.infer<typeof PolicyActionSchema>;
 
-export const DnsRuleViewSchema = z.object({
-  id: RuleIdSchema,
-  pattern: z.string().min(1).max(255),
-  match_mode: PolicyMatchModeSchema,
-  action: PolicyActionSchema,
-  comment: z.string(),
-  updated_at_epoch: z.number().int().nonnegative()
-});
-export type DnsRuleView = z.infer<typeof DnsRuleViewSchema>;
+export interface DnsRuleView {
+  id: RuleId;
+  pattern: string;
+  match_mode: PolicyMatchMode;
+  action: PolicyAction;
+  comment: string;
+  updated_at_epoch: number;
+}
+
+export const DnsRuleViewSchema: z.ZodType<DnsRuleView> = z
+  .object({
+    id: RuleIdSchema,
+    pattern: z.string().min(1).max(255).optional(),
+    domain: z.string().min(1).max(255).optional(),
+    match_mode: PolicyMatchModeSchema.optional(),
+    action: PolicyActionSchema.optional(),
+    kind: z.enum(['allow', 'block']).optional(),
+    enabled: z.boolean().optional(),
+    comment: z.string().optional(),
+    updated_at_epoch: z.number().int().nonnegative()
+  })
+  .transform((raw): DnsRuleView => {
+    const resolvedAction: PolicyAction =
+      raw.action ?? (raw.kind === 'allow' ? 'Allow' : 'BlockNxDomain');
+    return {
+      id: raw.id,
+      pattern: raw.pattern ?? raw.domain ?? '',
+      match_mode: raw.match_mode ?? 'Suffix',
+      action: resolvedAction,
+      comment: raw.comment ?? '',
+      updated_at_epoch: raw.updated_at_epoch
+    };
+  });
 
 export const PaginatedDnsRulesSchema = createPaginatedSchema(DnsRuleViewSchema);
 
-export const PolicySettingsViewSchema = z.object({
-  enabled: z.boolean(),
-  sinkhole_ipv4: z.string(),
-  sinkhole_ipv6: z.string(),
-  block_private_rebinding: z.boolean()
-});
-export type PolicySettingsView = z.infer<typeof PolicySettingsViewSchema>;
+export interface PolicySettingsView {
+  enabled: boolean;
+  sinkhole_ipv4: string;
+  sinkhole_ipv6: string;
+  block_private_rebinding: boolean;
+  block_action?: string;
+}
+
+export const PolicySettingsViewSchema: z.ZodType<PolicySettingsView> = z
+  .object({
+    enabled: z.boolean().optional(),
+    sinkhole_ipv4: z.string().optional(),
+    sinkhole_ipv6: z.string().optional(),
+    block_private_rebinding: z.boolean(),
+    block_action: z.string().optional()
+  })
+  .transform((raw): PolicySettingsView => ({
+    enabled: raw.enabled ?? true,
+    sinkhole_ipv4: raw.sinkhole_ipv4 ?? '0.0.0.0',
+    sinkhole_ipv6: raw.sinkhole_ipv6 ?? '::',
+    block_private_rebinding: raw.block_private_rebinding,
+    ...(raw.block_action !== undefined ? { block_action: raw.block_action } : {})
+  }));
 
 export const AddRuleFormSchema = z.object({
   pattern: z

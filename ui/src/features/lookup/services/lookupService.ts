@@ -10,10 +10,14 @@ export const lookupService = {
     checking_disabled: boolean;
   }): Promise<DnsLookupResponse> {
     return httpClient.request(
-      '/api/v1/tools/dns-lookup',
+      '/api/v1/dns/lookup',
       {
         method: 'POST',
-        body: JSON.stringify(payload)
+        body: JSON.stringify({
+          name: payload.domain,
+          record_type: payload.rr_type,
+          do_bit: payload.dnssec_do
+        })
       },
       DnsLookupResponseSchema
     );

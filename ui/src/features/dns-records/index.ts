@@ -1,5 +1,7 @@
 export { LocalDnsRecordsFeature } from './components/LocalDnsRecordsFeature';
 export { CloudflareRecordModal } from './components/CloudflareRecordModal';
+export { RecordDirectoryCard } from './components/RecordDirectoryCard';
+export { RecordDetailCard } from './components/RecordDetailCard';
 export { ZonesNavigatorCard } from './components/ZonesNavigatorCard';
 export { ZoneContextHeaderCard } from './components/ZoneContextHeaderCard';
 export { RecordsToolbar } from './components/RecordsToolbar';

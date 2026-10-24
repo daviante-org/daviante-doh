@@ -29,9 +29,11 @@ export const DnsZoneViewSchema = z.object({
 });
 export type DnsZoneView = z.infer<typeof DnsZoneViewSchema>;
 
-export const ZoneListResponseSchema = z.object({
-  items: z.array(DnsZoneViewSchema)
-});
+export const ZoneListResponseSchema = z
+  .union([
+    z.array(DnsZoneViewSchema).transform((items) => ({ items })),
+    z.object({ items: z.array(DnsZoneViewSchema) })
+  ]);
 
 export const UpsertZonePayloadSchema = z.object({
   name: z.string().min(1).max(253),
@@ -48,11 +50,18 @@ export const UpsertZonePayloadSchema = z.object({
 });
 export type UpsertZonePayload = z.infer<typeof UpsertZonePayloadSchema>;
 
-export const ZoneExportResponseSchema = z.object({
-  zone_id: z.string(),
-  zone_name: z.string(),
-  bind_zone_file: z.string()
-});
+export const ZoneExportResponseSchema = z
+  .object({
+    zone_id: z.string(),
+    zone_name: z.string(),
+    bind_zone_file: z.string().optional(),
+    bind_zone_text: z.string().optional()
+  })
+  .transform((data) => ({
+    zone_id: data.zone_id,
+    zone_name: data.zone_name,
+    bind_zone_file: data.bind_zone_file ?? data.bind_zone_text ?? ''
+  }));
 export type ZoneExportResponse = z.infer<typeof ZoneExportResponseSchema>;
 
 const RecordASchema = z.object({
@@ -298,20 +307,37 @@ export type LocalDnsRecordView = z.infer<typeof LocalDnsRecordViewSchema>;
 
 export const PaginatedLocalDnsRecordsSchema = createPaginatedSchema(LocalDnsRecordViewSchema);
 
-export const RecordPreviewResponseSchema = z.object({
-  canonical_domain: z.string(),
-  rr_type_code: z.number().int().min(1).max(65535),
-  bind_line: z.string(),
-  wire_size_bytes: z.number().int().nonnegative(),
-  auto_ptr_preview: z.string().nullable()
-});
+export const RecordPreviewResponseSchema = z
+  .object({
+    canonical_domain: z.string().optional(),
+    rr_type_code: z.number().int().min(1).max(65535),
+    bind_line: z.string().optional(),
+    bind_preview: z.string().optional(),
+    wire_size_bytes: z.number().int().nonnegative().optional(),
+    wire_rdata_len: z.number().int().nonnegative().optional(),
+    auto_ptr_preview: z.string().nullable().optional()
+  })
+  .transform((data) => ({
+    canonical_domain: data.canonical_domain ?? '',
+    rr_type_code: data.rr_type_code,
+    bind_line: data.bind_line ?? data.bind_preview ?? '',
+    wire_size_bytes: data.wire_size_bytes ?? data.wire_rdata_len ?? 0,
+    auto_ptr_preview: data.auto_ptr_preview ?? null
+  }));
 export type RecordPreviewResponse = z.infer<typeof RecordPreviewResponseSchema>;
 
-export const BulkImportRecordsResponseSchema = z.object({
-  imported_count: z.number().int().nonnegative(),
-  skipped_count: z.number().int().nonnegative(),
-  errors: z.array(z.string())
-});
+export const BulkImportRecordsResponseSchema = z
+  .object({
+    imported_count: z.number().int().nonnegative(),
+    skipped_count: z.number().int().nonnegative().optional(),
+    errors: z.array(z.string()).optional(),
+    warnings: z.array(z.string()).optional()
+  })
+  .transform((data) => ({
+    imported_count: data.imported_count,
+    skipped_count: data.skipped_count ?? 0,
+    errors: data.errors ?? data.warnings ?? []
+  }));
 export type BulkImportRecordsResponse = z.infer<typeof BulkImportRecordsResponseSchema>;
 
 export interface UpsertRecordPayload {

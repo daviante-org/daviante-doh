@@ -1,4 +1,6 @@
 export { DnsLookupTesterFeature } from './components/DnsLookupTesterFeature';
+export { LookupQueryDirectoryCard } from './components/LookupQueryDirectoryCard';
+export { LookupResultDetailCard } from './components/LookupResultDetailCard';
 export { LookupQueryFormCard } from './components/LookupQueryFormCard';
 export { LookupResultSummaryCard } from './components/LookupResultSummaryCard';
 export { LookupRecordSectionTable } from './components/LookupRecordSectionTable';

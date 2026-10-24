@@ -63,7 +63,7 @@ describe('LoginView, Branding, Governance & Static Error Mapping (Rule 4.2 & OWA
     });
   });
 
-  it('renders AppShell with /logo.svg (light) and /logo-dark.svg (dark), Policies & Terms modal, and AboutModal with /favicon.svg', async () => {
+  it('renders AppShell with /logo.svg (light) and /logo-dark.svg (dark), ToggleGroup, UserMenuDropdown, and AboutModal with /favicon.svg', async () => {
     document.documentElement.classList.remove('pf-v6-theme-dark');
     const mockLogout = vi.fn().mockResolvedValue(undefined);
     const mockSelectTab = vi.fn();
@@ -84,13 +84,19 @@ describe('LoginView, Branding, Governance & Static Error Mapping (Rule 4.2 & OWA
     const mastheadLogo = screen.getByAltText('Daviante DoH Control-Plane');
     expect(mastheadLogo).toHaveAttribute('src', '/logo.svg');
 
-    // Toggle dark theme in Masthead -> switches to /logo-dark.svg
-    const darkSwitch = screen.getByLabelText(/Dark theme/i, { selector: 'input' });
-    fireEvent.click(darkSwitch);
+    // Toggle dark theme in Masthead ToggleGroup -> switches to /logo-dark.svg
+    const darkThemeBtn = screen.getByRole('button', { name: /Dark theme/i });
+    fireEvent.click(darkThemeBtn);
     expect(mastheadLogo).toHaveAttribute('src', '/logo-dark.svg');
 
-    const aboutBtn = screen.getByRole('button', { name: /About Daviante DoH/i });
-    fireEvent.click(aboutBtn);
+    // Open UserMenuDropdown and click About Daviante DoH
+    const userMenuToggle = screen.getByRole('button', { name: /admin/i });
+    fireEvent.click(userMenuToggle);
+
+    const aboutMenuItem = await screen.findByRole('menuitem', {
+      name: /About Daviante DoH/i
+    });
+    fireEvent.click(aboutMenuItem);
 
     await waitFor(() => {
       expect(
@@ -102,7 +108,7 @@ describe('LoginView, Branding, Governance & Static Error Mapping (Rule 4.2 & OWA
     expect(aboutEmblem).toHaveAttribute('src', '/favicon.svg');
   });
 
-  it('renders LocalDnsRecordsPage master-detail zone navigator, RDATA value summary, category filter, and Clone modal', async () => {
+  it('renders LocalDnsRecordsPage master-detail directory card (lg=4), detail inspector card (lg=8), and Clone modal', async () => {
     vi.spyOn(dnsRecordsService, 'listZones').mockResolvedValue([
       {
         id: ZoneIdSchema.parse('zone-1'),
@@ -128,6 +134,7 @@ describe('LoginView, Branding, Governance & Static Error Mapping (Rule 4.2 & OWA
         {
           id: RecordIdSchema.parse('rec-1'),
           zone_id: 'zone-1',
+          zone_name: 'internal.corp',
           domain: 'api.internal.corp',
           ttl: 300,
           enabled: true,
@@ -151,15 +158,17 @@ describe('LoginView, Branding, Governance & Static Error Mapping (Rule 4.2 & OWA
     render(<LocalDnsRecordsPage role="Admin" />);
 
     await waitFor(() => {
-      expect(screen.getByText('api.internal.corp')).toBeInTheDocument();
+      expect(screen.getAllByText('api.internal.corp').length).toBeGreaterThanOrEqual(2);
     });
 
-    // Check RDATA value summary badge and human-friendly TTL
-    expect(screen.getByText('Auto-PTR')).toBeInTheDocument();
-    expect(screen.getByText('5m (300s)')).toBeInTheDocument();
+    // Check RDATA value summary badge and detail section headers
+    expect(screen.getAllByText('Auto-PTR').length).toBeGreaterThanOrEqual(1);
+    expect(
+      screen.getByText('Resource Record & RDATA Configuration')
+    ).toBeInTheDocument();
 
-    // Click Clone button -> opens CloudflareRecordModal in Clone mode
-    const cloneBtn = screen.getByRole('button', { name: /Clone api.internal.corp/i });
+    // Click Clone record button -> opens CloudflareRecordModal in Clone mode
+    const cloneBtn = screen.getByRole('button', { name: /Clone record/i });
     fireEvent.click(cloneBtn);
 
     await waitFor(() => {

@@ -13,17 +13,39 @@ export type ZoneId = z.infer<typeof ZoneIdSchema>;
 export const RuleIdSchema = z.string().min(1).max(128).brand<'RuleId'>();
 export type RuleId = z.infer<typeof RuleIdSchema>;
 
-export const AdminRoleSchema = z.enum(['SuperAdmin', 'Admin', 'ReadOnly']);
-export type AdminRole = z.infer<typeof AdminRoleSchema>;
+export type AdminRole = 'SuperAdmin' | 'Admin' | 'ReadOnly';
 
-export const ProblemDetailsSchema = z.object({
-  type: z.string(),
-  title: z.string(),
-  status: z.number(),
-  detail: z.string(),
-  code: z.string(),
-  request_id: z.string().optional()
-});
+export const AdminRoleSchema: z.ZodType<AdminRole> = z
+  .enum(['SuperAdmin', 'Admin', 'ReadOnly', 'admin', 'viewer'])
+  .transform((val): AdminRole => {
+    if (val === 'admin') {
+      return 'Admin';
+    }
+    if (val === 'viewer') {
+      return 'ReadOnly';
+    }
+    return val;
+  });
+
+export const ProblemDetailsSchema = z
+  .object({
+    type: z.string(),
+    title: z.string(),
+    status: z.number(),
+    detail: z.string(),
+    code: z.string().optional(),
+    error_code: z.string().optional(),
+    field: z.string().nullable().optional(),
+    request_id: z.string().optional()
+  })
+  .transform((data) => ({
+    type: data.type,
+    title: data.title,
+    status: data.status,
+    detail: data.detail,
+    code: data.code ?? data.error_code ?? 'UNKNOWN_ERROR',
+    request_id: data.request_id
+  }));
 export type ProblemDetails = z.infer<typeof ProblemDetailsSchema>;
 
 export function createPaginatedSchema<T extends z.ZodType>(itemSchema: T) {

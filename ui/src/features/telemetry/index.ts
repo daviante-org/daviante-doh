@@ -1,4 +1,6 @@
 export { TelemetryDashboardFeature } from './components/TelemetryDashboardFeature';
+export { TelemetryEventDirectoryCard } from './components/TelemetryEventDirectoryCard';
+export { TelemetryEventDetailCard } from './components/TelemetryEventDetailCard';
 export { TelemetryKpiGrid } from './components/TelemetryKpiGrid';
 export { UpstreamHealthCard } from './components/UpstreamHealthCard';
 export { RecentDnsActivityCard } from './components/RecentDnsActivityCard';

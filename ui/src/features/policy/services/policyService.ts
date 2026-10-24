@@ -21,7 +21,10 @@ export const policyService = {
       '/api/v1/policy/settings',
       {
         method: 'PUT',
-        body: JSON.stringify(payload)
+        body: JSON.stringify({
+          block_action: payload.block_action ?? 'nxdomain',
+          block_private_rebinding: payload.block_private_rebinding
+        })
       },
       PolicySettingsViewSchema
     );
@@ -56,7 +59,12 @@ export const policyService = {
       '/api/v1/policy/rules',
       {
         method: 'POST',
-        body: JSON.stringify(payload)
+        body: JSON.stringify({
+          kind: payload.action === 'Allow' ? 'allow' : 'block',
+          domain: payload.pattern,
+          comment: payload.comment,
+          enabled: true
+        })
       },
       DnsRuleViewSchema
     );
@@ -66,7 +74,10 @@ export const policyService = {
     await httpClient.request(
       `/api/v1/policy/rules/${encodeURIComponent(id)}`,
       { method: 'DELETE' },
-      z.object({ deleted: z.boolean() })
+      z.object({
+        deleted: z.boolean().optional(),
+        deleted_id: z.string().optional()
+      })
     );
   }
 };

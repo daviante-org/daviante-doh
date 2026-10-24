@@ -19,15 +19,30 @@ import {
   ZoneListResponseSchema
 } from '../types/dnsRecords.types';
 
+const DeleteZoneResponseSchema = z
+  .object({
+    deleted: z.boolean().optional(),
+    deleted_id: z.string().optional(),
+    deleted_records: z.union([z.number().int().nonnegative(), z.boolean()]).optional(),
+    deleted_records_count: z.number().int().nonnegative().optional()
+  })
+  .transform((data) => ({
+    deleted: data.deleted ?? true,
+    deleted_records:
+      typeof data.deleted_records === 'number'
+        ? data.deleted_records
+        : (data.deleted_records_count ?? 0)
+  }));
+
 export const dnsRecordsService = {
   async listZones(): Promise<DnsZoneView[]> {
-    const res = await httpClient.request('/api/v1/zones', { method: 'GET' }, ZoneListResponseSchema);
+    const res = await httpClient.request('/api/v1/dns/zones', { method: 'GET' }, ZoneListResponseSchema);
     return res.items;
   },
 
   async createZone(payload: UpsertZonePayload): Promise<DnsZoneView> {
     return httpClient.request(
-      '/api/v1/zones',
+      '/api/v1/dns/zones',
       {
         method: 'POST',
         body: JSON.stringify(payload)
@@ -38,7 +53,7 @@ export const dnsRecordsService = {
 
   async updateZone(id: ZoneId, payload: UpsertZonePayload): Promise<DnsZoneView> {
     return httpClient.request(
-      `/api/v1/zones/${encodeURIComponent(id)}`,
+      `/api/v1/dns/zones/${encodeURIComponent(id)}`,
       {
         method: 'PUT',
         body: JSON.stringify(payload)
@@ -55,15 +70,15 @@ export const dnsRecordsService = {
       delete_records: deleteRecords ? 'true' : 'false'
     });
     return httpClient.request(
-      `/api/v1/zones/${encodeURIComponent(id)}?${params.toString()}`,
+      `/api/v1/dns/zones/${encodeURIComponent(id)}?${params.toString()}`,
       { method: 'DELETE' },
-      z.object({ deleted: z.boolean(), deleted_records: z.number().int().nonnegative() })
+      DeleteZoneResponseSchema
     );
   },
 
   async exportZoneBind(id: ZoneId): Promise<ZoneExportResponse> {
     return httpClient.request(
-      `/api/v1/zones/${encodeURIComponent(id)}/export`,
+      `/api/v1/dns/zones/${encodeURIComponent(id)}/export`,
       { method: 'GET' },
       ZoneExportResponseSchema
     );
@@ -96,7 +111,7 @@ export const dnsRecordsService = {
       params.set('zone_id', zoneId.trim());
     }
     return httpClient.request(
-      `/api/v1/records?${params.toString()}`,
+      `/api/v1/dns/records?${params.toString()}`,
       { method: 'GET' },
       PaginatedLocalDnsRecordsSchema
     );
@@ -111,7 +126,7 @@ export const dnsRecordsService = {
     record: LocalRecordData;
   }): Promise<RecordPreviewResponse> {
     return httpClient.request(
-      '/api/v1/records/preview',
+      '/api/v1/dns/records/preview',
       {
         method: 'POST',
         body: JSON.stringify(payload)
@@ -122,7 +137,7 @@ export const dnsRecordsService = {
 
   async createRecord(payload: UpsertRecordPayload): Promise<LocalDnsRecordView> {
     return httpClient.request(
-      '/api/v1/records',
+      '/api/v1/dns/records',
       {
         method: 'POST',
         body: JSON.stringify(payload)
@@ -133,7 +148,7 @@ export const dnsRecordsService = {
 
   async updateRecord(id: RecordId, payload: UpsertRecordPayload): Promise<LocalDnsRecordView> {
     return httpClient.request(
-      `/api/v1/records/${encodeURIComponent(id)}`,
+      `/api/v1/dns/records/${encodeURIComponent(id)}`,
       {
         method: 'PUT',
         body: JSON.stringify(payload)
@@ -144,9 +159,12 @@ export const dnsRecordsService = {
 
   async deleteRecord(id: RecordId): Promise<void> {
     await httpClient.request(
-      `/api/v1/records/${encodeURIComponent(id)}`,
+      `/api/v1/dns/records/${encodeURIComponent(id)}`,
       { method: 'DELETE' },
-      z.object({ deleted: z.boolean() })
+      z.object({
+        deleted: z.boolean().optional(),
+        deleted_id: z.string().optional()
+      })
     );
   },
 
@@ -157,11 +175,33 @@ export const dnsRecordsService = {
     default_ttl?: number;
     records?: UpsertRecordPayload[];
   }): Promise<BulkImportRecordsResponse> {
+    if (payload.format === 'json' && payload.records !== undefined) {
+      let importedCount = 0;
+      const errors: string[] = [];
+      for (const rec of payload.records) {
+        try {
+          await dnsRecordsService.createRecord(rec);
+          importedCount += 1;
+        } catch (err) {
+          errors.push(err instanceof Error ? err.message : 'Failed to import record.');
+        }
+      }
+      return {
+        imported_count: importedCount,
+        skipped_count: errors.length,
+        errors
+      };
+    }
+
     return httpClient.request(
-      '/api/v1/records/import',
+      '/api/v1/dns/records/import',
       {
         method: 'POST',
-        body: JSON.stringify(payload)
+        body: JSON.stringify({
+          zone_id: payload.zone_id ?? null,
+          content: payload.bind_text ?? '',
+          dry_run: false
+        })
       },
       BulkImportRecordsResponseSchema
     );

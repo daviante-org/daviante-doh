@@ -3,13 +3,29 @@ import { AdminRoleSchema, CsrfTokenSchema } from '../../../types';
 
 export const SessionStatusResponseSchema = z.object({
   authenticated: z.boolean(),
-  username: z.string().nullable(),
-  role: AdminRoleSchema.nullable(),
-  auth_method: z.string().nullable(),
-  csrf_token: CsrfTokenSchema.nullable(),
+  username: z
+    .string()
+    .nullable()
+    .optional()
+    .transform((v) => v ?? null),
+  role: AdminRoleSchema.nullable()
+    .optional()
+    .transform((v) => v ?? null),
+  auth_method: z
+    .string()
+    .nullable()
+    .optional()
+    .transform((v) => v ?? null),
+  csrf_token: CsrfTokenSchema.nullable()
+    .optional()
+    .transform((v) => v ?? null),
   local_auth_enabled: z.boolean(),
   oidc_enabled: z.boolean(),
-  oidc_provider_name: z.string().nullable()
+  oidc_provider_name: z
+    .string()
+    .nullable()
+    .optional()
+    .transform((v) => v ?? null)
 });
 export type SessionStatusResponse = z.infer<typeof SessionStatusResponseSchema>;
 

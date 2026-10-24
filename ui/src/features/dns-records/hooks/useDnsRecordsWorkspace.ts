@@ -14,6 +14,8 @@ import type {
 } from '../types/dnsRecords.types';
 import { matchesCategoryFilter } from '../utils/recordFormatters';
 
+export type DnsDirectoryMode = 'records' | 'zones';
+
 export interface ZoneFormState {
   name: string;
   mode: ZoneMode;
@@ -31,11 +33,13 @@ export interface ZoneFormState {
 export function useDnsRecordsWorkspace(role: AdminRole) {
   const isReadOnly = role === 'ReadOnly';
 
+  const [directoryMode, setDirectoryMode] = useState<DnsDirectoryMode>('records');
   const [zones, setZones] = useState<DnsZoneView[]>([]);
   const [selectedZoneKey, setSelectedZoneKey] = useState<string>('ALL');
   const [zoneSearchInput, setZoneSearchInput] = useState('');
 
   const [records, setRecords] = useState<LocalDnsRecordView[]>([]);
+  const [selectedRecordId, setSelectedRecordId] = useState<string | null>(null);
   const [total, setTotal] = useState(0);
   const [page, setPage] = useState(1);
   const [perPage, setPerPage] = useState(20);
@@ -110,6 +114,12 @@ export function useDnsRecordsWorkspace(role: AdminRole) {
     matchesCategoryFilter(item.record.type, categoryFilter)
   );
 
+  const selectedRecord =
+    visibleRecords.find((r) => r.id === selectedRecordId) ?? visibleRecords[0] ?? null;
+
+  const selectedZone =
+    activeZone ?? filteredZones[0] ?? zones[0] ?? null;
+
   const loadZonesAndRecords = async (): Promise<void> => {
     setIsLoading(true);
     setPageError(null);
@@ -130,6 +140,16 @@ export function useDnsRecordsWorkspace(role: AdminRole) {
       setRecords(recordsRes.items);
       setTotal(recordsRes.total);
       setSelectedRecordIds(new Set());
+      if (recordsRes.items.length > 0) {
+        setSelectedRecordId((prev) => {
+          if (prev !== null && recordsRes.items.some((r) => r.id === prev)) {
+            return prev;
+          }
+          return recordsRes.items[0]?.id ?? null;
+        });
+      } else {
+        setSelectedRecordId(null);
+      }
     } catch (err: unknown) {
       if (err instanceof AdminApiError) {
         setPageError(err.userMessage);
@@ -144,6 +164,15 @@ export function useDnsRecordsWorkspace(role: AdminRole) {
   useEffect(() => {
     void loadZonesAndRecords();
   }, [page, perPage, debouncedSearch, filterRecordType, filterEnabled, selectedZoneKey]);
+
+  const handleClearRecordFilters = (): void => {
+    setSearchInput('');
+    setSelectedZoneKey('ALL');
+    setFilterRecordType('');
+    setCategoryFilter('ALL');
+    setFilterEnabled('all');
+    setPage(1);
+  };
 
   const openCreateRecordModal = (): void => {
     setEditingRecord(null);
@@ -172,7 +201,8 @@ export function useDnsRecordsWorkspace(role: AdminRole) {
       await dnsRecordsService.updateRecord(existingId, payload);
       setActionSuccess(`Updated ${payload.record.type} record for ${payload.domain}.`);
     } else {
-      await dnsRecordsService.createRecord(payload);
+      const created = await dnsRecordsService.createRecord(payload);
+      setSelectedRecordId(created.id);
       setActionSuccess(`Created ${payload.record.type} record for ${payload.domain}.`);
     }
     await loadZonesAndRecords();
@@ -491,13 +521,17 @@ export function useDnsRecordsWorkspace(role: AdminRole) {
 
   return {
     isReadOnly,
+    directoryMode,
     zones,
     filteredZones,
     selectedZoneKey,
     zoneSearchInput,
     activeZone,
+    selectedZone,
     records,
     visibleRecords,
+    selectedRecord,
+    selectedRecordId,
     total,
     page,
     perPage,
@@ -531,8 +565,10 @@ export function useDnsRecordsWorkspace(role: AdminRole) {
     isImporting,
     importError,
     importResult,
+    setDirectoryMode,
     setSelectedZoneKey,
     setZoneSearchInput,
+    setSelectedRecordId,
     setPage,
     setPerPage,
     setSearchInput,
@@ -550,6 +586,8 @@ export function useDnsRecordsWorkspace(role: AdminRole) {
     setImportDefaultTtl,
     setImportError,
     setImportResult,
+    loadZonesAndRecords,
+    handleClearRecordFilters,
     openCreateRecordModal,
     openEditRecordModal,
     openCloneRecordModal,

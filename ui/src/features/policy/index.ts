@@ -1,4 +1,6 @@
 export { ProtectivePolicyFeature } from './components/ProtectivePolicyFeature';
+export { PolicyRuleDirectoryCard } from './components/PolicyRuleDirectoryCard';
+export { PolicyRuleDetailCard } from './components/PolicyRuleDetailCard';
 export { PolicyEnforcementCard } from './components/PolicyEnforcementCard';
 export { PolicyRulesTableCard } from './components/PolicyRulesTableCard';
 export { AddPolicyRuleModal } from './components/AddPolicyRuleModal';

@@ -9,8 +9,15 @@ import {
   type DnsLookupResponse
 } from '../types/lookup.types';
 
+export interface LookupHistoryEntry {
+  readonly id: string;
+  readonly executedAt: string;
+  readonly response: DnsLookupResponse;
+}
+
 export function useDnsLookup() {
-  const [result, setResult] = useState<DnsLookupResponse | null>(null);
+  const [history, setHistory] = useState<LookupHistoryEntry[]>([]);
+  const [selectedHistoryId, setSelectedHistoryId] = useState<string | null>(null);
   const [lookupError, setLookupError] = useState<string | null>(null);
   const [isRunning, setIsRunning] = useState(false);
 
@@ -24,6 +31,11 @@ export function useDnsLookup() {
     }
   });
 
+  const selectedEntry =
+    history.find((item) => item.id === selectedHistoryId) ?? history[0] ?? null;
+
+  const result = selectedEntry?.response ?? null;
+
   const onSubmit = async (values: DnsLookupFormValues): Promise<void> => {
     setLookupError(null);
     setIsRunning(true);
@@ -34,7 +46,14 @@ export function useDnsLookup() {
         dnssec_do: values.dnssec_do,
         checking_disabled: values.checking_disabled
       });
-      setResult(res);
+      const entryId = `lookup-${String(Date.now())}`;
+      const newEntry: LookupHistoryEntry = {
+        id: entryId,
+        executedAt: new Date().toLocaleTimeString(),
+        response: res
+      };
+      setHistory((prev) => [newEntry, ...prev.slice(0, 19)]);
+      setSelectedHistoryId(entryId);
     } catch (err: unknown) {
       if (err instanceof AdminApiError) {
         setLookupError(err.userMessage);
@@ -49,6 +68,10 @@ export function useDnsLookup() {
   return {
     form,
     result,
+    selectedEntry,
+    history,
+    selectedHistoryId,
+    setSelectedHistoryId,
     lookupError,
     isRunning,
     onSubmit
