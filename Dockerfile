@@ -2,7 +2,7 @@
 # =============================================================================
 # Stage 1: Build & Test daviante-doh (by Daviante - https://daviante.org)
 # =============================================================================
-FROM rust@sha256:557a94c82b485a14b569120e00867267108c734efe33f10cc31ca0cd5dd1eca9 AS builder
+FROM rust@sha256:09027f873d45b8ecd1dc86f1fa13b7a62b875c961f017a0e331267b350430137 AS builder
 
 ARG BUILD_TLS=true
 ARG RUN_TESTS=true
