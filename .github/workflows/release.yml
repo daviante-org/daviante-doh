@@ -70,7 +70,7 @@ jobs:
 
       - name: Set up QEMU & Docker Buildx for Multi-Arch (linux/amd64, linux/arm64)
         run: |
-          docker run --privileged --rm tonistiigi/binfmt:qemu-v9.2.2-52 --install all
+          docker run --privileged --rm tonistiigi/binfmt@sha256:400a4873b838d1b89194d982c45e5fb3cda4593fbfd7e08a02e76b03b21166f0 --install all
           docker buildx create --name daviante-multiarch --driver docker-container --use --bootstrap
 
       - name: Log in to GitHub Container Registry (GHCR)
@@ -107,10 +107,10 @@ jobs:
           echo "digest=${IMAGE_DIGEST}" >> "$GITHUB_OUTPUT"
           echo "Published multi-arch image ${IMAGE_REPO}:${VERSION} (${IMAGE_DIGEST})"
 
-      - name: Scan Published GHCR Container Image with Trivy v0.76.0
+      - name: Scan Published GHCR Container Image with Trivy v0.76.1
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
-          version: "v0.76.0"
+          version: "v0.76.1"
           image-ref: "ghcr.io/daviante-org/daviante-doh:${{ steps.meta.outputs.version }}"
           format: "table"
           exit-code: "1"

@@ -34,16 +34,16 @@ if ($ExportBinaries) {
     New-Item -ItemType Directory -Path "dist" -Force | Out-Null
 
     $CrossDockerfile = @"
-FROM rust:1-alpine3.21 AS cross
+FROM rust@sha256:7e9e2d068a107a2adafd19930011178d14a78326053cd4c3a9f7ad3fd049557d AS cross
 RUN apk add --no-cache musl-dev pkgconfig zig mingw-w64-gcc && \
-    cargo install cargo-zigbuild && \
+    cargo install cargo-zigbuild --version 0.24.0 --locked && \
     rustup target add x86_64-unknown-linux-musl aarch64-unknown-linux-musl x86_64-pc-windows-gnu
 WORKDIR /build
-COPY Cargo.toml LICENSE ./
+COPY Cargo.toml Cargo.lock LICENSE ./
 COPY src ./src
-RUN cargo zigbuild --release --target x86_64-unknown-linux-musl && \
-    cargo zigbuild --release --target aarch64-unknown-linux-musl && \
-    cargo zigbuild --release --target x86_64-pc-windows-gnu
+RUN cargo zigbuild --release --locked --target x86_64-unknown-linux-musl && \
+    cargo zigbuild --release --locked --target aarch64-unknown-linux-musl && \
+    cargo zigbuild --release --locked --target x86_64-pc-windows-gnu
 "@
     $CrossDockerfile | Set-Content -Path "dist\Dockerfile.cross" -Encoding UTF8
     & $Engine build -t daviante-doh-cross-builder -f dist\Dockerfile.cross .

@@ -2,7 +2,7 @@
 # =============================================================================
 # Stage 1: Build & Test daviante-doh (by Daviante - https://daviante.org)
 # =============================================================================
-FROM rust@sha256:557a94c82b485a14b569120e00867267108c734efe33f10cc31ca0cd5dd1eca9 AS builder
+FROM rust@sha256:7e9e2d068a107a2adafd19930011178d14a78326053cd4c3a9f7ad3fd049557d AS builder
 
 ARG BUILD_TLS=true
 ARG RUN_TESTS=true
@@ -27,7 +27,7 @@ RUN if [ "$RUN_TESTS" = "true" ]; then \
 # =============================================================================
 # Stage 2: Hardened Alpine 3.24 Runtime (Docker / Podman / K8s / OpenShift)
 # =============================================================================
-FROM alpine@sha256:294b683cb724975bec92580e1e685676bd4b50bda910ddb8c51d4cabeaec77e6 AS runtime
+FROM alpine@sha256:be2656061b536c1883c4034790e21d0a09c5aaaf51968b89368a3c0371ea2c9a AS runtime
 
 LABEL org.opencontainers.image.title="daviante-doh" \
       org.opencontainers.image.description="Lightweight, 100% configurable DoH (RFC 8484), ODoH (RFC 9230), and JSON DoH server by Daviante (daviante.org)" \

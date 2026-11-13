@@ -60,9 +60,9 @@ chmod 0644 "$CERT_FILE" "$KEY_FILE" "$PEM_FILE"
 # 1. Ensure kind is installed and bootstrap cluster
 # -----------------------------------------------------------------------------
 if ! command -v kind >/dev/null 2>&1; then
-    echo "==> Installing kind v0.27.0..."
+    echo "==> Installing kind v0.33.0..."
     mkdir -p "$HOME/.local/bin"
-    curl --proto '=https' --tlsv1.2 -fsSLo "$HOME/.local/bin/kind" "https://kind.sigs.k8s.io/dl/v0.27.0/kind-linux-amd64"
+    curl --proto '=https' --tlsv1.2 -fsSLo "$HOME/.local/bin/kind" "https://kind.sigs.k8s.io/dl/v0.33.0/kind-linux-amd64"
     chmod +x "$HOME/.local/bin/kind"
     export PATH="$HOME/.local/bin:$PATH"
 fi
@@ -71,17 +71,17 @@ echo "==> [1/6] Creating kind Kubernetes cluster (${CLUSTER_NAME})..."
 kind delete cluster --name "$CLUSTER_NAME" >/dev/null 2>&1 || true
 kind create cluster --name "$CLUSTER_NAME" --wait 90s
 
-echo "==> [2/6] Loading pre-built ${IMAGE_TAG} and pulling haproxy:3.1-alpine into kind cluster..."
+echo "==> [2/6] Loading pre-built ${IMAGE_TAG} and pulling haproxy:3.4-alpine into kind cluster..."
 if ! kind load docker-image "$IMAGE_TAG" --name "$CLUSTER_NAME"; then
     docker save "$IMAGE_TAG" | docker exec -i "${CLUSTER_NAME}-control-plane" ctr --namespace=k8s.io images import --digests --snapshotter=overlayfs -
 fi
-docker exec "${CLUSTER_NAME}-control-plane" crictl pull docker.io/library/haproxy:3.1-alpine >/dev/null
+docker exec "${CLUSTER_NAME}-control-plane" crictl pull docker.io/library/haproxy:3.4-alpine >/dev/null
 
 # -----------------------------------------------------------------------------
 # 2. Install MetalLB Layer-2 LoadBalancer Controller
 # -----------------------------------------------------------------------------
-echo "==> [3/6] Installing MetalLB v0.14.9 Layer-2 LoadBalancer..."
-kubectl apply -f https://raw.githubusercontent.com/metallb/metallb/v0.14.9/config/manifests/metallb-native.yaml >/dev/null
+echo "==> [3/6] Installing MetalLB v0.16.1 Layer-2 LoadBalancer..."
+kubectl apply -f https://raw.githubusercontent.com/metallb/metallb/v0.16.1/config/manifests/metallb-native.yaml >/dev/null
 kubectl wait --namespace metallb-system \
     --for=condition=ready pod \
     --selector=app=metallb \
@@ -234,7 +234,7 @@ spec:
     spec:
       containers:
         - name: haproxy
-          image: haproxy:3.1-alpine
+          image: haproxy:3.4-alpine
           imagePullPolicy: Never
           args: ["-f", "/etc/haproxy/cfg/haproxy.cfg"]
           ports:
@@ -408,7 +408,7 @@ spec:
     spec:
       containers:
         - name: router
-          image: haproxy:3.1-alpine
+          image: haproxy:3.4-alpine
           imagePullPolicy: Never
           args: ["-f", "/etc/haproxy/cfg/haproxy.cfg"]
           ports:
